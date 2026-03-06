@@ -488,7 +488,7 @@ function mapCollectionForOutput(params: {
         songName: song.name,
         clipName: clip.name,
         sourceId: clip.sourceAudioId,
-        url: withBasePath(`/api/files/${audio.id}`),
+        url: withBasePath(`/api/public/files/${audio.id}`),
         startSec: clip.startSec,
         endSec: clip.endSec,
         sortOrder: item.sortOrder

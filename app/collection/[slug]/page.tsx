@@ -64,6 +64,23 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+async function fetchWithTimeout(url: string, timeoutMs = 45000): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(withBasePath(url), {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal: controller.signal
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 export default function CollectionPage(props: { params: { slug: string } }): JSX.Element {
   const [collection, setCollection] = useState<PublicCollection | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -133,10 +150,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       }
 
       const loadPromise = (async () => {
-        const response = await fetch(withBasePath(url), {
-          cache: "no-store",
-          credentials: "same-origin"
-        });
+        const response = await fetchWithTimeout(url, 45000);
         if (!response.ok) {
           throw new Error(`No se pudo cargar audio (${response.status}).`);
         }
@@ -162,10 +176,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     setIsLoading(true);
     setErrorMessage(null);
 
-    void fetch(withBasePath(`/api/public/collections/${props.params.slug}`), {
-      cache: "no-store",
-      credentials: "same-origin"
-    })
+    void fetchWithTimeout(`/api/public/collections/${props.params.slug}`, 15000)
       .then(async (response) => {
         const data = (await response.json()) as {
           collection?: PublicCollection;
@@ -196,21 +207,10 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
   }, [props.params.slug]);
 
   useEffect(() => {
-    if (!collection) {
-      return;
-    }
-    orderedClips.forEach((clip) => {
-      void getCachedAudioBuffer(`audio:${clip.sourceId}`, clip.url).catch(() => {
-        // Preload best effort.
-      });
-    });
-  }, [collection, getCachedAudioBuffer, orderedClips]);
-
-  useEffect(() => {
     if (!useCountdown) {
       return;
     }
-    void getCachedAudioBuffer("countdown", "/api/countdown").catch(() => {
+    void getCachedAudioBuffer("countdown", "/api/public/countdown").catch(() => {
       // Preload best effort.
     });
   }, [getCachedAudioBuffer, useCountdown]);
@@ -251,6 +251,15 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       playbackRuntimeRef.current = runtime;
 
       const context = getPlaybackContext();
+      try {
+        await context.resume();
+      } catch {
+        throw new Error("No se pudo activar el audio en este dispositivo.");
+      }
+      if (context.state !== "running") {
+        throw new Error("Pulsa Play de nuevo para activar el audio del navegador.");
+      }
+
       const setPlaybackIfActive = (next: PlaybackState) => {
         if (playbackControllerRef.current === controller) {
           setPlayback(next);
@@ -271,7 +280,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
         let countdownBuffer: AudioBuffer | null = null;
         let countdownDurationSec = 0;
         if (useCountdown) {
-          countdownBuffer = await getCachedAudioBuffer("countdown", "/api/countdown");
+          countdownBuffer = await getCachedAudioBuffer("countdown", "/api/public/countdown");
           countdownDurationSec = countdownBuffer.duration;
         }
 
@@ -338,7 +347,9 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
           });
         }
 
-        await context.resume();
+        if (context.state !== "running") {
+          await context.resume();
+        }
 
         if (countdownBuffer) {
           const countdownSource = context.createBufferSource();
@@ -473,4 +484,3 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     </main>
   );
 }
-

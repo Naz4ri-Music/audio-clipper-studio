@@ -2189,13 +2189,23 @@ export function ClipStudio(): JSX.Element {
                 ))}
               </select>
 
-              <span className="small-note">
-                {isLoadingCollections
-                  ? "Cargando colecciones..."
-                  : selectedCollectionForAdd
-                    ? `URL pública: ${withBasePath(`/collection/${selectedCollectionForAdd.slug}`)}`
-                    : "No hay colección seleccionada."}
-              </span>
+              {isLoadingCollections ? (
+                <span className="small-note">Cargando colecciones...</span>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={!selectedCollectionForAdd}
+                  onClick={() => {
+                    if (!selectedCollectionForAdd) {
+                      return;
+                    }
+                    void copyCollectionLink(selectedCollectionForAdd.slug);
+                  }}
+                >
+                  Copy URL
+                </button>
+              )}
             </div>
 
             <div className="collection-list">
