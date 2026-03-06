@@ -42,6 +42,123 @@ async function runBinary(command: string, args: string[]): Promise<{ stdout: str
   });
 }
 
+async function runBinaryBuffer(
+  command: string,
+  args: string[],
+  maxStdoutBytes = 64 * 1024 * 1024
+): Promise<{ stdout: Buffer; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const chunks: Buffer[] = [];
+    let stdoutBytes = 0;
+    let stderr = "";
+    let exceeded = false;
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (exceeded) {
+        return;
+      }
+
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > maxStdoutBytes) {
+        exceeded = true;
+        child.kill("SIGKILL");
+        return;
+      }
+
+      chunks.push(chunk);
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("error", (error) => {
+      reject(new BinaryExecutionError(`${command} no está disponible: ${error.message}`));
+    });
+
+    child.on("close", (code) => {
+      if (exceeded) {
+        reject(new BinaryExecutionError(`Salida demasiado grande en ${command}.`));
+        return;
+      }
+
+      if (code === 0) {
+        resolve({ stdout: Buffer.concat(chunks), stderr });
+        return;
+      }
+      reject(new BinaryExecutionError(`${command} terminó con código ${code}. ${stderr}`));
+    });
+  });
+}
+
+export async function extractWaveformPeaks(params: {
+  filePath: string;
+  samples?: number;
+}): Promise<number[]> {
+  const safeSamples = Math.min(4000, Math.max(64, Math.floor(params.samples ?? 700)));
+
+  const { stdout } = await runBinaryBuffer("ffmpeg", [
+    "-v",
+    "error",
+    "-i",
+    params.filePath,
+    "-ac",
+    "1",
+    "-ar",
+    "8000",
+    "-f",
+    "f32le",
+    "pipe:1"
+  ]);
+
+  if (stdout.length < 4) {
+    return new Array<number>(safeSamples).fill(0);
+  }
+
+  const usableBytes = stdout.length - (stdout.length % 4);
+  if (usableBytes <= 0) {
+    return new Array<number>(safeSamples).fill(0);
+  }
+
+  const copied = stdout.buffer.slice(stdout.byteOffset, stdout.byteOffset + usableBytes);
+  const pcm = new Float32Array(copied);
+  if (pcm.length === 0) {
+    return new Array<number>(safeSamples).fill(0);
+  }
+
+  const blockSize = Math.max(1, Math.floor(pcm.length / safeSamples));
+  const peaks = new Array<number>(safeSamples).fill(0);
+  let globalPeak = 0;
+
+  for (let i = 0; i < safeSamples; i += 1) {
+    const start = i * blockSize;
+    const end = i === safeSamples - 1 ? pcm.length : Math.min(start + blockSize, pcm.length);
+    let localPeak = 0;
+
+    for (let j = start; j < end; j += 1) {
+      const value = Math.abs(pcm[j] || 0);
+      if (value > localPeak) {
+        localPeak = value;
+      }
+    }
+
+    peaks[i] = localPeak;
+    if (localPeak > globalPeak) {
+      globalPeak = localPeak;
+    }
+  }
+
+  if (globalPeak <= 0) {
+    return peaks;
+  }
+
+  return peaks.map((value) => value / globalPeak);
+}
+
 export async function probeDurationSec(filePath: string): Promise<number | null> {
   try {
     const { stdout } = await runBinary("ffprobe", [

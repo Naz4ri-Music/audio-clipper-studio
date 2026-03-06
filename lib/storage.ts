@@ -43,6 +43,22 @@ export interface ClipRecord {
   createdAt: string;
 }
 
+export interface CollectionRecord {
+  id: string;
+  name: string;
+  slug: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CollectionClipRecord {
+  id: string;
+  collectionId: string;
+  clipId: string;
+  sortOrder: number;
+  createdAt: string;
+}
+
 interface LegacyStore {
   records?: Array<{
     id: string;
@@ -57,11 +73,13 @@ interface LegacyStore {
 }
 
 interface AudioStore {
-  version: 2;
+  version: 3;
   records: AudioRecord[];
   folders: FolderRecord[];
   songs: SongRecord[];
   clips: ClipRecord[];
+  collections: CollectionRecord[];
+  collectionClips: CollectionClipRecord[];
 }
 
 export interface LibraryAudioItem {
@@ -104,17 +122,41 @@ export interface LibraryData {
   rootSongs: LibrarySongItem[];
 }
 
+export interface CollectionClipItem {
+  id: string;
+  clipId: string;
+  songId: string;
+  songName: string;
+  clipName: string;
+  sourceId: string;
+  url: string;
+  startSec: number;
+  endSec: number | null;
+  sortOrder: number;
+}
+
+export interface CollectionItem {
+  id: string;
+  name: string;
+  slug: string;
+  createdAt: string;
+  updatedAt: string;
+  clips: CollectionClipItem[];
+}
+
 const DATA_DIR = path.join(process.cwd(), "data");
 const UPLOAD_DIR = path.join(DATA_DIR, "uploads");
 const GENERATED_DIR = path.join(DATA_DIR, "generated");
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 
 const EMPTY_STORE: AudioStore = {
-  version: 2,
+  version: 3,
   records: [],
   folders: [],
   songs: [],
-  clips: []
+  clips: [],
+  collections: [],
+  collectionClips: []
 };
 
 function normalizeExtension(originalName: string, mimeType: string): string {
@@ -221,11 +263,13 @@ function migrateLegacyStore(parsed: LegacyStore): AudioStore {
   }
 
   return {
-    version: 2,
+    version: 3,
     records: legacyRecords,
     folders: [],
     songs,
-    clips
+    clips,
+    collections: [],
+    collectionClips: []
   };
 }
 
@@ -236,13 +280,42 @@ function parseStore(raw: string): AudioStore {
     if (
       typeof parsed === "object" &&
       parsed !== null &&
-      (parsed as Partial<AudioStore>).version === 2 &&
+      (parsed as Partial<AudioStore>).version === 3 &&
+      Array.isArray((parsed as Partial<AudioStore>).records) &&
+      Array.isArray((parsed as Partial<AudioStore>).folders) &&
+      Array.isArray((parsed as Partial<AudioStore>).songs) &&
+      Array.isArray((parsed as Partial<AudioStore>).clips) &&
+      Array.isArray((parsed as Partial<AudioStore>).collections) &&
+      Array.isArray((parsed as Partial<AudioStore>).collectionClips)
+    ) {
+      return parsed as AudioStore;
+    }
+
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { version?: number }).version === 2 &&
       Array.isArray((parsed as Partial<AudioStore>).records) &&
       Array.isArray((parsed as Partial<AudioStore>).folders) &&
       Array.isArray((parsed as Partial<AudioStore>).songs) &&
       Array.isArray((parsed as Partial<AudioStore>).clips)
     ) {
-      return parsed as AudioStore;
+      const migrated = parsed as unknown as {
+        records: AudioRecord[];
+        folders: FolderRecord[];
+        songs: SongRecord[];
+        clips: ClipRecord[];
+      };
+
+      return {
+        version: 3,
+        records: migrated.records,
+        folders: migrated.folders,
+        songs: migrated.songs,
+        clips: migrated.clips,
+        collections: [],
+        collectionClips: []
+      };
     }
 
     return migrateLegacyStore(parsed as LegacyStore);
@@ -256,7 +329,7 @@ async function readStore(): Promise<AudioStore> {
   const raw = await readFile(STORE_PATH, "utf-8");
   const store = parseStore(raw);
 
-  if (!raw.includes('"version": 2')) {
+  if (!raw.includes('"version": 3')) {
     await writeStore(store);
   }
 
@@ -362,6 +435,239 @@ export async function getLibraryData(): Promise<LibraryData> {
     folders,
     rootSongs
   };
+}
+
+function slugify(input: string): string {
+  const normalized = input
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return normalized || "collection";
+}
+
+function uniqueCollectionSlug(base: string, existing: Set<string>): string {
+  if (!existing.has(base)) {
+    return base;
+  }
+
+  let idx = 2;
+  while (existing.has(`${base}-${idx}`)) {
+    idx += 1;
+  }
+  return `${base}-${idx}`;
+}
+
+function mapCollectionForOutput(params: {
+  collection: CollectionRecord;
+  collectionClips: CollectionClipRecord[];
+  clipsById: Map<string, ClipRecord>;
+  songsById: Map<string, SongRecord>;
+  recordsById: Map<string, AudioRecord>;
+}): CollectionItem {
+  const clips = params.collectionClips
+    .filter((item) => item.collectionId === params.collection.id)
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((item) => {
+      const clip = params.clipsById.get(item.clipId);
+      if (!clip) {
+        return null;
+      }
+      const song = params.songsById.get(clip.songId);
+      const audio = params.recordsById.get(clip.sourceAudioId);
+      if (!song || !audio) {
+        return null;
+      }
+
+      return {
+        id: item.id,
+        clipId: clip.id,
+        songId: song.id,
+        songName: song.name,
+        clipName: clip.name,
+        sourceId: clip.sourceAudioId,
+        url: withBasePath(`/api/files/${audio.id}`),
+        startSec: clip.startSec,
+        endSec: clip.endSec,
+        sortOrder: item.sortOrder
+      } satisfies CollectionClipItem;
+    })
+    .filter((clip): clip is CollectionClipItem => clip !== null);
+
+  return {
+    id: params.collection.id,
+    name: params.collection.name,
+    slug: params.collection.slug,
+    createdAt: params.collection.createdAt,
+    updatedAt: params.collection.updatedAt,
+    clips
+  };
+}
+
+export async function getCollectionsData(): Promise<CollectionItem[]> {
+  const store = await readStore();
+  const clipsById = new Map(store.clips.map((clip) => [clip.id, clip]));
+  const songsById = new Map(store.songs.map((song) => [song.id, song]));
+  const recordsById = new Map(store.records.map((record) => [record.id, record]));
+
+  return [...store.collections]
+    .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1))
+    .map((collection) =>
+      mapCollectionForOutput({
+        collection,
+        collectionClips: store.collectionClips,
+        clipsById,
+        songsById,
+        recordsById
+      })
+    );
+}
+
+export async function getPublicCollectionBySlug(slug: string): Promise<CollectionItem | null> {
+  const store = await readStore();
+  const collection = store.collections.find((item) => item.slug === slug);
+  if (!collection) {
+    return null;
+  }
+
+  const clipsById = new Map(store.clips.map((clip) => [clip.id, clip]));
+  const songsById = new Map(store.songs.map((song) => [song.id, song]));
+  const recordsById = new Map(store.records.map((record) => [record.id, record]));
+
+  return mapCollectionForOutput({
+    collection,
+    collectionClips: store.collectionClips,
+    clipsById,
+    songsById,
+    recordsById
+  });
+}
+
+export async function createCollection(params: {
+  name: string;
+  slug?: string | null;
+}): Promise<CollectionRecord> {
+  const store = await readStore();
+  const name = sanitizeRequiredName(params.name, "Colección");
+
+  const slugBase = slugify(params.slug ? sanitizeName(params.slug) : name);
+  const existingSlugs = new Set(store.collections.map((item) => item.slug));
+  const slug = uniqueCollectionSlug(slugBase, existingSlugs);
+
+  const now = new Date().toISOString();
+  const collection: CollectionRecord = {
+    id: randomUUID(),
+    name,
+    slug,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  store.collections.push(collection);
+  await writeStore(store);
+  return collection;
+}
+
+export async function updateCollection(params: {
+  collectionId: string;
+  name?: string | null;
+  slug?: string | null;
+}): Promise<CollectionRecord> {
+  const store = await readStore();
+  const collection = store.collections.find((item) => item.id === params.collectionId);
+  if (!collection) {
+    throw new Error("Colección no encontrada");
+  }
+
+  if (typeof params.name === "string") {
+    collection.name = sanitizeRequiredName(params.name, collection.name);
+  }
+
+  if (typeof params.slug === "string") {
+    const requested = slugify(params.slug);
+    const existingSlugs = new Set(store.collections.filter((item) => item.id !== collection.id).map((item) => item.slug));
+    collection.slug = uniqueCollectionSlug(requested, existingSlugs);
+  }
+
+  collection.updatedAt = new Date().toISOString();
+  await writeStore(store);
+  return collection;
+}
+
+export async function deleteCollectionById(collectionId: string): Promise<boolean> {
+  const store = await readStore();
+  const index = store.collections.findIndex((item) => item.id === collectionId);
+  if (index < 0) {
+    return false;
+  }
+
+  store.collections.splice(index, 1);
+  store.collectionClips = store.collectionClips.filter((item) => item.collectionId !== collectionId);
+  await writeStore(store);
+  return true;
+}
+
+export async function addClipToCollection(params: {
+  collectionId: string;
+  clipId: string;
+}): Promise<CollectionClipRecord> {
+  const store = await readStore();
+  const collection = store.collections.find((item) => item.id === params.collectionId);
+  if (!collection) {
+    throw new Error("Colección no encontrada");
+  }
+  const clip = store.clips.find((item) => item.id === params.clipId);
+  if (!clip) {
+    throw new Error("Clip no encontrado");
+  }
+
+  const existing = store.collectionClips.find(
+    (item) => item.collectionId === params.collectionId && item.clipId === params.clipId
+  );
+  if (existing) {
+    return existing;
+  }
+
+  const maxSort = store.collectionClips
+    .filter((item) => item.collectionId === params.collectionId)
+    .reduce((max, item) => Math.max(max, item.sortOrder), 0);
+
+  const record: CollectionClipRecord = {
+    id: randomUUID(),
+    collectionId: params.collectionId,
+    clipId: params.clipId,
+    sortOrder: maxSort + 1,
+    createdAt: new Date().toISOString()
+  };
+
+  store.collectionClips.push(record);
+  collection.updatedAt = new Date().toISOString();
+  await writeStore(store);
+  return record;
+}
+
+export async function removeClipFromCollection(params: {
+  collectionId: string;
+  clipId: string;
+}): Promise<boolean> {
+  const store = await readStore();
+  const before = store.collectionClips.length;
+  store.collectionClips = store.collectionClips.filter(
+    (item) => !(item.collectionId === params.collectionId && item.clipId === params.clipId)
+  );
+  if (store.collectionClips.length === before) {
+    return false;
+  }
+
+  const collection = store.collections.find((item) => item.id === params.collectionId);
+  if (collection) {
+    collection.updatedAt = new Date().toISOString();
+  }
+
+  await writeStore(store);
+  return true;
 }
 
 export async function createFolder(name: string): Promise<FolderRecord> {
@@ -690,6 +996,41 @@ export async function renameClip(params: {
   return clip;
 }
 
+export async function updateClip(params: {
+  clipId: string;
+  name?: string;
+  startSec?: number;
+  endSec?: number | null;
+}): Promise<ClipRecord> {
+  const store = await readStore();
+  const clip = store.clips.find((item) => item.id === params.clipId);
+  if (!clip) {
+    throw new Error("Clip no encontrado");
+  }
+
+  if (typeof params.name === "string") {
+    clip.name = sanitizeRequiredName(params.name, clip.name);
+  }
+
+  if (typeof params.startSec === "number" && Number.isFinite(params.startSec)) {
+    clip.startSec = Math.max(0, params.startSec);
+  }
+
+  if (params.endSec === null) {
+    clip.endSec = null;
+  } else if (typeof params.endSec === "number" && Number.isFinite(params.endSec)) {
+    clip.endSec = Math.max(params.endSec, clip.startSec);
+  }
+
+  const song = store.songs.find((item) => item.id === clip.songId);
+  if (song) {
+    song.updatedAt = new Date().toISOString();
+  }
+
+  await writeStore(store);
+  return clip;
+}
+
 export async function deleteClipById(clipId: string): Promise<boolean> {
   const store = await readStore();
   const index = store.clips.findIndex((clip) => clip.id === clipId);
@@ -699,6 +1040,7 @@ export async function deleteClipById(clipId: string): Promise<boolean> {
   }
 
   const [removed] = store.clips.splice(index, 1);
+  store.collectionClips = store.collectionClips.filter((item) => item.clipId !== removed.id);
   const song = store.songs.find((item) => item.id === removed.songId);
   if (song) {
     song.updatedAt = new Date().toISOString();
@@ -718,6 +1060,8 @@ async function deleteSongInStore(store: AudioStore, songId: string): Promise<boo
   const [song] = store.songs.splice(songIndex, 1);
   const removedClips = store.clips.filter((clip) => clip.songId === songId);
   store.clips = store.clips.filter((clip) => clip.songId !== songId);
+  const removedClipIds = new Set(removedClips.map((clip) => clip.id));
+  store.collectionClips = store.collectionClips.filter((item) => !removedClipIds.has(item.clipId));
 
   const candidateAudioIds = new Set<string>();
   if (song.masterAudioId) {

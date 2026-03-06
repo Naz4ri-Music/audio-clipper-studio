@@ -383,6 +383,7 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.18);
   overflow: hidden;
   cursor: crosshair;
+  background: linear-gradient(135deg, #101e36, #122b22);
 }
 
 .wave-canvas {
@@ -555,6 +556,74 @@ body {
   gap: 0.55rem;
 }
 
+.collections-admin {
+  margin-top: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.85rem;
+  padding: 0.85rem;
+  background: rgba(14, 14, 14, 0.68);
+  display: grid;
+  gap: 0.65rem;
+}
+
+.collections-admin h3 {
+  margin: 0;
+}
+
+.collections-create-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto;
+  gap: 0.5rem;
+}
+
+.collections-add-inline {
+  display: grid;
+  grid-template-columns: minmax(220px, 360px) 1fr;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.collection-list {
+  display: grid;
+  gap: 0.62rem;
+}
+
+.collection-card {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 0.78rem;
+  background: rgba(16, 16, 16, 0.82);
+  padding: 0.7rem;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.collection-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.collection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.42rem;
+}
+
+.collection-clip-items {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.collection-clip-items li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
 .context-menu {
   position: fixed;
   z-index: 50;
@@ -586,7 +655,9 @@ body {
   .panel-grid,
   .range-grid,
   .add-clip-row,
-  .inline-row {
+  .inline-row,
+  .collections-create-grid,
+  .collections-add-inline {
     grid-template-columns: 1fr;
   }
 

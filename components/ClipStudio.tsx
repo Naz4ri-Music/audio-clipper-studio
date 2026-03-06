@@ -46,6 +46,28 @@ interface LibraryPayload {
   rootSongs: LibrarySong[];
 }
 
+interface CollectionClipLink {
+  id: string;
+  clipId: string;
+  songId: string;
+  songName: string;
+  clipName: string;
+  sourceId: string;
+  url: string;
+  startSec: number;
+  endSec: number | null;
+  sortOrder: number;
+}
+
+interface CollectionItem {
+  id: string;
+  name: string;
+  slug: string;
+  createdAt: string;
+  updatedAt: string;
+  clips: CollectionClipLink[];
+}
+
 interface PlaybackState {
   clipId: string | null;
   phase: PlaybackPhase;
@@ -245,6 +267,8 @@ function detectEffectiveDuration(buffer: AudioBuffer): number {
 
 export function ClipStudio(): JSX.Element {
   const [library, setLibrary] = useState<LibraryPayload | null>(null);
+  const [collections, setCollections] = useState<CollectionItem[]>([]);
+  const [isLoadingCollections, setIsLoadingCollections] = useState(true);
   const [isLoadingLibrary, setIsLoadingLibrary] = useState(true);
   const [studioView, setStudioView] = useState<StudioView>("library");
 
@@ -275,6 +299,12 @@ export function ClipStudio(): JSX.Element {
   const [endSec, setEndSec] = useState(15);
   const [clipName, setClipName] = useState("Clip 1");
   const [isCreatingClip, setIsCreatingClip] = useState(false);
+  const [editingClipId, setEditingClipId] = useState<string | null>(null);
+
+  const [newCollectionName, setNewCollectionName] = useState("");
+  const [newCollectionSlug, setNewCollectionSlug] = useState("");
+  const [isCreatingCollection, setIsCreatingCollection] = useState(false);
+  const [selectedCollectionIdForAdd, setSelectedCollectionIdForAdd] = useState<string>("");
 
   const [useCountdown, setUseCountdown] = useState(true);
   const [delaySec, setDelaySec] = useState(0);
@@ -312,6 +342,21 @@ export function ClipStudio(): JSX.Element {
     [allSongs, selectedSongId]
   );
   const currentMaster = selectedSong?.master ?? null;
+  const allClipsForCollections = useMemo(
+    () =>
+      allSongs.flatMap((song) =>
+        song.clips.map((clip) => ({
+          clipId: clip.id,
+          songId: song.id,
+          label: `${song.name} · ${clip.name}`
+        }))
+      ),
+    [allSongs]
+  );
+  const selectedCollectionForAdd = useMemo(
+    () => collections.find((collection) => collection.id === selectedCollectionIdForAdd) ?? null,
+    [collections, selectedCollectionIdForAdd]
+  );
 
   const uploadFolderSongs = useMemo(() => {
     if (!library) {
@@ -442,8 +487,9 @@ export function ClipStudio(): JSX.Element {
       return null;
     }
 
+    const resolvedMasterUrl = withBasePath(currentMaster.url);
     const current = previewAudioRef.current;
-    if (current && current.src.endsWith(currentMaster.url)) {
+    if (current && current.src.endsWith(resolvedMasterUrl)) {
       return current;
     }
 
@@ -452,7 +498,7 @@ export function ClipStudio(): JSX.Element {
       current.currentTime = 0;
     }
 
-    const next = new Audio(currentMaster.url);
+    const next = new Audio(resolvedMasterUrl);
     next.preload = "auto";
     previewAudioRef.current = next;
     return next;
@@ -553,6 +599,26 @@ export function ClipStudio(): JSX.Element {
     setInfoMessage(null);
   };
 
+  const refreshCollections = useCallback(async () => {
+    const response = await fetchWithTimeout(withBasePath("/api/collections"), { cache: "no-store" }, 15000);
+    const data = await parseJsonResponse<{
+      collections?: CollectionItem[];
+      error?: string;
+    }>(response);
+
+    if (!response.ok || !Array.isArray(data.collections)) {
+      throw new Error(data.error || "No se pudieron cargar las colecciones");
+    }
+
+    setCollections(data.collections);
+    setSelectedCollectionIdForAdd((current) => {
+      if (current && data.collections?.some((collection) => collection.id === current)) {
+        return current;
+      }
+      return data.collections?.[0]?.id ?? "";
+    });
+  }, []);
+
   const refreshLibrary = useCallback(
     async (preferredSongId?: string) => {
       const response = await fetchWithTimeout(withBasePath("/api/library"), { cache: "no-store" }, 15000);
@@ -647,6 +713,29 @@ export function ClipStudio(): JSX.Element {
   }, [refreshLibrary]);
 
   useEffect(() => {
+    let cancelled = false;
+    setIsLoadingCollections(true);
+
+    void refreshCollections()
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        const message = error instanceof Error ? error.message : "Error inesperado";
+        setErrorMessage(message);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingCollections(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshCollections]);
+
+  useEffect(() => {
     if (selectedUploadFolderId === "root") {
       return;
     }
@@ -719,44 +808,91 @@ export function ClipStudio(): JSX.Element {
     setIsAnalyzingWave(true);
     setErrorMessage(null);
 
-    void fetchWithTimeout(currentMaster.url, { cache: "no-store", signal: controller.signal }, 25000)
-      .then(async (response) => {
-        if (!response.ok) {
-          const details = await response.text();
+    void (async () => {
+      try {
+        const waveformResponse = await fetchWithTimeout(
+          withBasePath(`/api/waveform/${currentMaster.id}?samples=700`),
+          { cache: "no-store", signal: controller.signal },
+          60000
+        );
+        const waveformPayload = await parseJsonResponse<{
+          peaks?: unknown;
+          durationSec?: number | null;
+          error?: string;
+        }>(waveformResponse);
+
+        if (!waveformResponse.ok || !Array.isArray(waveformPayload.peaks)) {
           throw new Error(
-            `No se pudo cargar el audio del master (${response.status})${details ? `: ${details.slice(0, 120)}` : ""}`
+            waveformPayload.error || `No se pudo cargar la forma de onda (${waveformResponse.status})`
           );
         }
-        return response.arrayBuffer();
-      })
-      .then((buffer) => extractWaveform(buffer))
-      .then((result) => {
+
         if (cancelled) {
           return;
         }
 
-        setWaveform(result.peaks);
-        setWaveDurationSec(result.durationSec);
+        const normalizedPeaks = waveformPayload.peaks
+          .map((value) => (typeof value === "number" && Number.isFinite(value) ? value : 0))
+          .slice(0, 700);
+        const safePeaks = normalizedPeaks.length > 0 ? normalizedPeaks : new Array<number>(700).fill(0);
+        const durationSec =
+          typeof waveformPayload.durationSec === "number" && Number.isFinite(waveformPayload.durationSec)
+            ? waveformPayload.durationSec
+            : currentMaster.durationSec ?? 0;
+
+        setWaveform(safePeaks);
+        setWaveDurationSec(durationSec);
         setWaveformSourceKey(currentMaster.id);
-      })
-      .catch((error) => {
-        if (cancelled) {
+        return;
+      } catch (waveformError) {
+        if (cancelled || isAbortError(waveformError)) {
           return;
         }
 
-        if (!isAbortError(error)) {
-          const message = error instanceof Error ? error.message : "No se pudo analizar la forma de onda del master";
-          setErrorMessage(message);
-        }
+        try {
+          const response = await fetchWithTimeout(
+            withBasePath(currentMaster.url),
+            { cache: "no-store", signal: controller.signal },
+            45000
+          );
+          if (!response.ok) {
+            const details = await response.text();
+            throw new Error(
+              `No se pudo cargar el audio del master (${response.status})${details ? `: ${details.slice(0, 120)}` : ""}`
+            );
+          }
+          const buffer = await response.arrayBuffer();
+          const result = await extractWaveform(buffer);
 
-        setWaveform([]);
-        setWaveDurationSec(currentMaster.durationSec ?? 0);
-      })
-      .finally(() => {
+          if (cancelled) {
+            return;
+          }
+
+          setWaveform(result.peaks);
+          setWaveDurationSec(result.durationSec);
+          setWaveformSourceKey(currentMaster.id);
+          return;
+        } catch (fallbackError) {
+          if (cancelled || isAbortError(fallbackError)) {
+            return;
+          }
+
+          const message =
+            fallbackError instanceof Error
+              ? fallbackError.message
+              : waveformError instanceof Error
+                ? waveformError.message
+                : "No se pudo analizar la forma de onda del master";
+          setErrorMessage(message);
+          setWaveform([]);
+          setWaveDurationSec(currentMaster.durationSec ?? 0);
+        }
+      } finally {
         if (!cancelled) {
           setIsAnalyzingWave(false);
         }
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
@@ -777,7 +913,7 @@ export function ClipStudio(): JSX.Element {
 
   useEffect(() => {
     const canvas = waveformCanvasRef.current;
-    if (!canvas || waveform.length === 0) {
+    if (!canvas) {
       return;
     }
 
@@ -803,6 +939,10 @@ export function ClipStudio(): JSX.Element {
       ctx.fillStyle = bgGradient;
       ctx.fillRect(0, 0, width, height);
 
+      if (waveform.length === 0) {
+        return;
+      }
+
       const centerY = height / 2;
       const barGap = 1;
       const barWidth = Math.max(1, (width - waveform.length * barGap) / waveform.length);
@@ -822,7 +962,7 @@ export function ClipStudio(): JSX.Element {
     return () => {
       window.removeEventListener("resize", draw);
     };
-  }, [waveform]);
+  }, [studioView, waveform]);
 
   useEffect(() => {
     const prevSongId = previousSelectedSongRef.current;
@@ -853,7 +993,7 @@ export function ClipStudio(): JSX.Element {
       return;
     }
 
-    void getCachedAudioBuffer(`audio:${selectedSong.master.id}`, selectedSong.master.url).catch(() => {
+    void getCachedAudioBuffer(`audio:${selectedSong.master.id}`, withBasePath(selectedSong.master.url)).catch(() => {
       // Keep UX resilient even if preload fails; playback path handles explicit errors.
     });
   }, [getCachedAudioBuffer, selectedSong?.master]);
@@ -936,6 +1076,7 @@ export function ClipStudio(): JSX.Element {
       }
 
       await refreshLibrary();
+      await refreshCollections();
       setInfoMessage("Carpeta eliminada en cascada.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "No se pudo eliminar la carpeta";
@@ -986,6 +1127,7 @@ export function ClipStudio(): JSX.Element {
       }
 
       await refreshLibrary();
+      await refreshCollections();
       setInfoMessage("Canción eliminada en cascada.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "No se pudo eliminar la canción";
@@ -1063,6 +1205,127 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
+  const handleCreateCollection = async () => {
+    const name = newCollectionName.trim();
+    if (!name) {
+      setErrorMessage("Escribe un nombre para la colección.");
+      return;
+    }
+
+    setIsCreatingCollection(true);
+    resetMessages();
+
+    try {
+      const response = await fetch(withBasePath("/api/collections"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          slug: newCollectionSlug.trim() || null
+        })
+      });
+      const data = (await response.json()) as { collection?: { id: string }; error?: string };
+      if (!response.ok || !data.collection) {
+        throw new Error(data.error || "No se pudo crear la colección");
+      }
+
+      await refreshCollections();
+      setSelectedCollectionIdForAdd(data.collection.id);
+      setNewCollectionName("");
+      setNewCollectionSlug("");
+      setInfoMessage("Colección creada.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo crear la colección";
+      setErrorMessage(message);
+    } finally {
+      setIsCreatingCollection(false);
+    }
+  };
+
+  const renameCollectionAction = async (collection: CollectionItem) => {
+    const name = window.prompt("Nuevo nombre de colección:", collection.name)?.trim();
+    if (!name) {
+      return;
+    }
+
+    try {
+      resetMessages();
+      const response = await fetch(withBasePath(`/api/collections/${collection.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name })
+      });
+      const data = (await response.json()) as { collection?: { id: string }; error?: string };
+      if (!response.ok || !data.collection) {
+        throw new Error(data.error || "No se pudo renombrar la colección");
+      }
+      await refreshCollections();
+      setInfoMessage("Colección renombrada.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo renombrar la colección";
+      setErrorMessage(message);
+    }
+  };
+
+  const deleteCollectionAction = async (collection: CollectionItem) => {
+    const confirmed = window.confirm(`Eliminar colección "${collection.name}"?`);
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      resetMessages();
+      const response = await fetch(withBasePath(`/api/collections/${collection.id}`), { method: "DELETE" });
+      const data = (await response.json()) as { ok?: boolean; error?: string };
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "No se pudo eliminar la colección");
+      }
+      await refreshCollections();
+      setInfoMessage("Colección eliminada.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo eliminar la colección";
+      setErrorMessage(message);
+    }
+  };
+
+  const addClipToCollectionAction = async (collectionId: string, clipId: string) => {
+    try {
+      resetMessages();
+      const response = await fetch(withBasePath(`/api/collections/${collectionId}/clips`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clipId })
+      });
+      const data = (await response.json()) as { item?: { id: string }; error?: string };
+      if (!response.ok || !data.item) {
+        throw new Error(data.error || "No se pudo añadir el clip");
+      }
+      await refreshCollections();
+      setInfoMessage("Clip añadido a la colección.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo añadir el clip";
+      setErrorMessage(message);
+    }
+  };
+
+  const removeClipFromCollectionAction = async (collectionId: string, clipId: string) => {
+    try {
+      resetMessages();
+      const response = await fetch(withBasePath(`/api/collections/${collectionId}/clips/${clipId}`), {
+        method: "DELETE"
+      });
+      const data = (await response.json()) as { ok?: boolean; error?: string };
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "No se pudo quitar el clip");
+      }
+      await refreshCollections();
+      setInfoMessage("Clip eliminado de la colección.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo quitar el clip";
+      setErrorMessage(message);
+    }
+  };
+
   const handleUpload = async () => {
     if (!selectedFile) {
       setErrorMessage("Selecciona un audio antes de subir.");
@@ -1135,7 +1398,7 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
-  const addClipFromMaster = async () => {
+  const saveClipFromMaster = async () => {
     if (!selectedSong || !selectedSong.master) {
       setErrorMessage("Selecciona una canción con master para crear clips.");
       return;
@@ -1145,15 +1408,18 @@ export function ClipStudio(): JSX.Element {
     resetMessages();
 
     try {
-      const response = await fetchWithTimeout(withBasePath("/api/clips"), {
-        method: "POST",
+      const method = editingClipId ? "PATCH" : "POST";
+      const endpoint = editingClipId ? withBasePath(`/api/clips/${editingClipId}`) : withBasePath("/api/clips");
+
+      const response = await fetchWithTimeout(endpoint, {
+        method,
         headers: {
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
+          name: clipName.trim() || `Clip ${selectedSong.clips.length + 1}`,
           songId: selectedSong.id,
           sourceAudioId: selectedSong.master.id,
-          name: clipName.trim() || `Clip ${selectedSong.clips.length + 1}`,
           startSec,
           endSec
         })
@@ -1165,15 +1431,17 @@ export function ClipStudio(): JSX.Element {
       }>(response);
 
       if (!response.ok || !data.clip) {
-        throw new Error(data.error || "No se pudo crear el clip");
+        throw new Error(data.error || "No se pudo guardar el clip");
       }
 
       await refreshLibrary(selectedSong.id);
+      await refreshCollections();
       setClipName(`Clip ${selectedSong.clips.length + 2}`);
+      setEditingClipId(null);
       setStudioView("library");
-      setInfoMessage("Clip guardado en la biblioteca.");
+      setInfoMessage(editingClipId ? "Clip actualizado." : "Clip guardado en la biblioteca.");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Error creando clip";
+      const message = error instanceof Error ? error.message : "Error guardando clip";
       setErrorMessage(message);
     } finally {
       setIsCreatingClip(false);
@@ -1200,6 +1468,7 @@ export function ClipStudio(): JSX.Element {
       if (selectedSong) {
         await refreshLibrary(selectedSong.id);
       }
+      await refreshCollections();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error eliminando clip";
       setErrorMessage(message);
@@ -1240,7 +1509,7 @@ export function ClipStudio(): JSX.Element {
       };
 
       try {
-        const clipBufferPromise = getCachedAudioBuffer(`audio:${clip.sourceId}`, clip.url);
+        const clipBufferPromise = getCachedAudioBuffer(`audio:${clip.sourceId}`, withBasePath(clip.url));
         const countdownBufferPromise = useCountdown
           ? getCachedAudioBuffer("countdown", withBasePath("/api/countdown"))
           : Promise.resolve(null);
@@ -1564,15 +1833,30 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
-  const openCreateClipView = (song: LibrarySong) => {
+  const openCreateClipView = (song: LibrarySong, clipToEdit?: LibraryClip) => {
     if (!song.master) {
       setErrorMessage("Esta canción no tiene master. Sube un master para crear clips.");
       return;
     }
 
+    if (clipToEdit && clipToEdit.sourceId !== song.master.id) {
+      setErrorMessage("Solo se pueden editar aquí clips basados en el master de la canción.");
+      return;
+    }
+
     resetMessages();
     setSelectedSongId(song.id);
-    setClipName(`Clip ${song.clips.length + 1}`);
+    if (clipToEdit) {
+      setEditingClipId(clipToEdit.id);
+      setClipName(clipToEdit.name);
+      setStartSec(clipToEdit.startSec);
+      const masterDuration = song.master.durationSec ?? 20;
+      const fallbackEnd = Math.max(clipToEdit.startSec + 0.1, masterDuration > 0 ? masterDuration : 20);
+      setEndSec(clipToEdit.endSec ?? fallbackEnd);
+    } else {
+      setEditingClipId(null);
+      setClipName(`Clip ${song.clips.length + 1}`);
+    }
     setStudioView("createClip");
   };
 
@@ -1642,6 +1926,14 @@ export function ClipStudio(): JSX.Element {
                       <div className="clip-head">
                         <h3>{clip.name}</h3>
                         <div className="clip-head-actions">
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            disabled={!song.master || clip.sourceId !== song.master.id}
+                            onClick={() => openCreateClipView(song, clip)}
+                          >
+                            Editar
+                          </button>
                           <button type="button" className="btn btn-ghost" onClick={() => void renameClipAction(clip.id, clip.name)}>
                             Renombrar
                           </button>
@@ -1685,6 +1977,15 @@ export function ClipStudio(): JSX.Element {
                           onClick={() => void downloadClip(clip, true)}
                         >
                           Descargar con cuenta atrás
+                        </button>
+
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          disabled={!selectedCollectionIdForAdd}
+                          onClick={() => void addClipToCollectionAction(selectedCollectionIdForAdd, clip.id)}
+                        >
+                          Añadir a colección
                         </button>
                       </div>
                     </article>
@@ -1829,14 +2130,138 @@ export function ClipStudio(): JSX.Element {
               ))}
             </div>
           )}
+
+          <div className="collections-admin">
+            <h3>Colecciones públicas</h3>
+            <p className="small-note">
+              Comparte enlaces públicos de entrenamiento: <code>{withBasePath("/collection/[slug]")}</code>
+            </p>
+
+            <div className="collections-create-grid">
+              <input
+                type="text"
+                className="text-input"
+                placeholder="Nombre colección"
+                value={newCollectionName}
+                onChange={(event) => setNewCollectionName(event.target.value)}
+              />
+              <input
+                type="text"
+                className="text-input"
+                placeholder="Slug opcional (ej: set-abril)"
+                value={newCollectionSlug}
+                onChange={(event) => setNewCollectionSlug(event.target.value)}
+              />
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => void handleCreateCollection()}
+                disabled={isCreatingCollection}
+              >
+                {isCreatingCollection ? "Creando..." : "Crear colección"}
+              </button>
+            </div>
+
+            <div className="collections-add-inline">
+              <select
+                className="number-input"
+                value={selectedCollectionIdForAdd}
+                onChange={(event) => setSelectedCollectionIdForAdd(event.target.value)}
+              >
+                <option value="">Selecciona colección...</option>
+                {collections.map((collection) => (
+                  <option key={collection.id} value={collection.id}>
+                    {collection.name}
+                  </option>
+                ))}
+              </select>
+
+              <span className="small-note">
+                {isLoadingCollections
+                  ? "Cargando colecciones..."
+                  : selectedCollectionForAdd
+                    ? `URL pública: ${withBasePath(`/collection/${selectedCollectionForAdd.slug}`)}`
+                    : "No hay colección seleccionada."}
+              </span>
+            </div>
+
+            <div className="collection-list">
+              {collections.length === 0 && <p className="small-note">Aún no hay colecciones públicas.</p>}
+              {collections.map((collection) => (
+                <article key={collection.id} className="collection-card">
+                  <div className="collection-head">
+                    <strong>{collection.name}</strong>
+                    <span className="small-note">/{collection.slug}</span>
+                  </div>
+
+                  <div className="collection-actions">
+                    <button type="button" className="btn btn-ghost" onClick={() => void renameCollectionAction(collection)}>
+                      Renombrar
+                    </button>
+                    <button type="button" className="btn btn-warning" onClick={() => void deleteCollectionAction(collection)}>
+                      Eliminar
+                    </button>
+                  </div>
+
+                  <p className="small-note">Clips: {collection.clips.length}</p>
+
+                  {collection.clips.length > 0 && (
+                    <ul className="collection-clip-items">
+                      {collection.clips.map((item) => (
+                        <li key={item.id}>
+                          <span>{item.songName} · {item.clipName}</span>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            onClick={() => void removeClipFromCollectionAction(collection.id, item.clipId)}
+                          >
+                            Quitar
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+
+                  <div className="collections-add-inline">
+                    <select
+                      className="number-input"
+                      defaultValue=""
+                      onChange={(event) => {
+                        const clipId = event.target.value;
+                        if (!clipId) {
+                          return;
+                        }
+                        void addClipToCollectionAction(collection.id, clipId);
+                        event.target.value = "";
+                      }}
+                    >
+                      <option value="">Añadir clip...</option>
+                      {allClipsForCollections.map((clipOption) => (
+                        <option key={clipOption.clipId} value={clipOption.clipId}>
+                          {clipOption.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </div>
         </section>
       )}
 
       {studioView === "createClip" && (
         <section className="panel editor-panel">
           <div className="editor-head">
-            <h2>Crear clips desde master</h2>
-            <button type="button" className="btn btn-ghost" onClick={() => setStudioView("library")}>
+            <h2>{editingClipId ? "Editar clip" : "Crear clips desde master"}</h2>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => {
+                setEditingClipId(null);
+                setStudioView("library");
+              }}
+            >
               Volver a biblioteca
             </button>
           </div>
@@ -1955,8 +2380,8 @@ export function ClipStudio(): JSX.Element {
                   value={clipName}
                   onChange={(event) => setClipName(event.target.value)}
                 />
-                <button type="button" className="btn btn-primary" onClick={() => void addClipFromMaster()} disabled={isCreatingClip}>
-                  {isCreatingClip ? "Guardando..." : "Guardar clip"}
+                <button type="button" className="btn btn-primary" onClick={() => void saveClipFromMaster()} disabled={isCreatingClip}>
+                  {isCreatingClip ? "Guardando..." : editingClipId ? "Guardar cambios" : "Guardar clip"}
                 </button>
               </div>
             </>
