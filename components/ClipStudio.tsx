@@ -1326,6 +1326,19 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
+  const copyCollectionLink = async (slug: string) => {
+    try {
+      const relativePath = withBasePath(`/collection/${slug}`);
+      const absoluteUrl = `${window.location.origin}${relativePath}`;
+      await navigator.clipboard.writeText(absoluteUrl);
+      setInfoMessage(`Enlace copiado: ${absoluteUrl}`);
+      setErrorMessage(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo copiar el enlace";
+      setErrorMessage(message);
+    }
+  };
+
   const handleUpload = async () => {
     if (!selectedFile) {
       setErrorMessage("Selecciona un audio antes de subir.");
@@ -2197,6 +2210,9 @@ export function ClipStudio(): JSX.Element {
                   <div className="collection-actions">
                     <button type="button" className="btn btn-ghost" onClick={() => void renameCollectionAction(collection)}>
                       Renombrar
+                    </button>
+                    <button type="button" className="btn btn-ghost" onClick={() => void copyCollectionLink(collection.slug)}>
+                      Copiar enlace
                     </button>
                     <button type="button" className="btn btn-warning" onClick={() => void deleteCollectionAction(collection)}>
                       Eliminar
