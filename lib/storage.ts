@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { withBasePath } from "@/lib/base-path";
 
 export type AudioKind = "upload" | "generated";
 export type SourceType = "master" | "clip";
@@ -299,7 +300,7 @@ function mapAudioRecord(record: AudioRecord | undefined): LibraryAudioItem | nul
   return {
     id: record.id,
     name: record.originalName,
-    url: `/api/files/${record.id}`,
+    url: withBasePath(`/api/files/${record.id}`),
     mimeType: record.mimeType,
     durationSec: record.durationSec,
     sourceType: record.sourceType
@@ -317,7 +318,7 @@ function mapSongForLibrary(song: SongRecord, recordsById: Map<string, AudioRecor
         id: clip.id,
         name: clip.name,
         sourceId: clip.sourceAudioId,
-        url: audio ? `/api/files/${audio.id}` : "",
+        url: audio ? withBasePath(`/api/files/${audio.id}`) : "",
         startSec: clip.startSec,
         endSec: clip.endSec,
         createdAt: clip.createdAt

@@ -1,6 +1,7 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { NextRequest, NextResponse } from "next/server";
+import { withBasePath } from "@/lib/base-path";
 import { BinaryExecutionError, renderClip } from "@/lib/ffmpeg";
 import {
   addGeneratedAudio,
@@ -74,7 +75,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       audio: {
         id: generated.id,
         name: generated.originalName,
-        url: `/api/files/${generated.id}?download=1&name=${downloadName}`
+        url: withBasePath(`/api/files/${generated.id}?download=1&name=${downloadName}`)
       }
     });
   } catch (error) {

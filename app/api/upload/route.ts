@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withBasePath } from "@/lib/base-path";
 import { probeDurationSec } from "@/lib/ffmpeg";
 import {
   registerUploadedAudioToSong,
@@ -58,7 +59,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       audio: {
         id: record.id,
         name: record.originalName,
-        url: `/api/files/${record.id}`,
+        url: withBasePath(`/api/files/${record.id}`),
         sourceType,
         durationSec
       },

@@ -1,6 +1,7 @@
 "use client";
 
 import { type DragEvent as ReactDragEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { withBasePath } from "@/lib/base-path";
 
 type SourceType = "master" | "clip";
 type PlaybackPhase = "idle" | "delay" | "countdown" | "clip";
@@ -464,7 +465,7 @@ export function ClipStudio(): JSX.Element {
 
   const refreshLibrary = useCallback(
     async (preferredSongId?: string) => {
-      const response = await fetch("/api/library", { cache: "no-store" });
+      const response = await fetch(withBasePath("/api/library"), { cache: "no-store" });
       const data = (await response.json()) as {
         library?: LibraryPayload;
         error?: string;
@@ -490,7 +491,7 @@ export function ClipStudio(): JSX.Element {
 
   const moveSong = useCallback(
     async (songId: string, folderId: string | null) => {
-      const response = await fetch(`/api/songs/${songId}/move`, {
+      const response = await fetch(withBasePath(`/api/songs/${songId}/move`), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -770,7 +771,7 @@ export function ClipStudio(): JSX.Element {
 
     try {
       resetMessages();
-      const response = await fetch(`/api/library/folders/${folderId}`, {
+      const response = await fetch(withBasePath(`/api/library/folders/${folderId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name })
@@ -798,7 +799,7 @@ export function ClipStudio(): JSX.Element {
 
     try {
       resetMessages();
-      const response = await fetch(`/api/library/folders/${folderId}`, { method: "DELETE" });
+      const response = await fetch(withBasePath(`/api/library/folders/${folderId}`), { method: "DELETE" });
       const data = (await response.json()) as { ok?: boolean; error?: string };
       if (!response.ok || !data.ok) {
         throw new Error(data.error || "No se pudo eliminar la carpeta");
@@ -820,7 +821,7 @@ export function ClipStudio(): JSX.Element {
 
     try {
       resetMessages();
-      const response = await fetch(`/api/songs/${songId}`, {
+      const response = await fetch(withBasePath(`/api/songs/${songId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name })
@@ -848,7 +849,7 @@ export function ClipStudio(): JSX.Element {
 
     try {
       resetMessages();
-      const response = await fetch(`/api/songs/${songId}`, { method: "DELETE" });
+      const response = await fetch(withBasePath(`/api/songs/${songId}`), { method: "DELETE" });
       const data = (await response.json()) as { ok?: boolean; error?: string };
       if (!response.ok || !data.ok) {
         throw new Error(data.error || "No se pudo eliminar la canción");
@@ -873,7 +874,7 @@ export function ClipStudio(): JSX.Element {
     resetMessages();
 
     try {
-      const response = await fetch("/api/library/folders", {
+      const response = await fetch(withBasePath("/api/library/folders"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -910,7 +911,7 @@ export function ClipStudio(): JSX.Element {
 
     try {
       resetMessages();
-      const response = await fetch(`/api/clips/${clipId}`, {
+      const response = await fetch(withBasePath(`/api/clips/${clipId}`), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name })
@@ -962,7 +963,7 @@ export function ClipStudio(): JSX.Element {
         formData.append("clipName", clipUploadName.trim() || baseName(selectedFile.name) || "Clip");
       }
 
-      const response = await fetch("/api/upload", {
+      const response = await fetch(withBasePath("/api/upload"), {
         method: "POST",
         body: formData
       });
@@ -1014,7 +1015,7 @@ export function ClipStudio(): JSX.Element {
     resetMessages();
 
     try {
-      const response = await fetch("/api/clips", {
+      const response = await fetch(withBasePath("/api/clips"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -1057,7 +1058,7 @@ export function ClipStudio(): JSX.Element {
     resetMessages();
 
     try {
-      const response = await fetch(`/api/clips/${clipId}`, {
+      const response = await fetch(withBasePath(`/api/clips/${clipId}`), {
         method: "DELETE"
       });
 
@@ -1126,7 +1127,7 @@ export function ClipStudio(): JSX.Element {
         if (useCountdown) {
           countdownBuffer = await fetchDecodedAudioBuffer({
             context,
-            url: "/api/countdown",
+            url: withBasePath("/api/countdown"),
             signal
           });
           countdownDurationSec = Math.min(countdownBuffer.duration, detectEffectiveDuration(countdownBuffer));
@@ -1240,7 +1241,7 @@ export function ClipStudio(): JSX.Element {
     setErrorMessage(null);
 
     try {
-      const response = await fetch("/api/render", {
+      const response = await fetch(withBasePath("/api/render"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
