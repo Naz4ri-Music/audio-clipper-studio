@@ -270,3 +270,40 @@ export async function renderClip(params: {
     await rm(tempDir, { recursive: true, force: true });
   }
 }
+
+export async function transcodeClipPreviewAac(params: {
+  sourcePath: string;
+  startSec: number;
+  endSec: number | null;
+  outputPath: string;
+  bitrateKbps?: number;
+}): Promise<void> {
+  const normalizedStart = Math.max(0, params.startSec || 0);
+  const normalizedEnd =
+    params.endSec !== null && Number.isFinite(params.endSec) ? Math.max(params.endSec, normalizedStart) : null;
+  const durationSec = normalizedEnd !== null ? Math.max(0.05, normalizedEnd - normalizedStart) : null;
+  const bitrate = Math.max(64, Math.min(320, Math.floor(params.bitrateKbps ?? 128)));
+
+  const args = ["-y", "-i", params.sourcePath, "-ss", normalizedStart.toFixed(3)];
+  if (durationSec !== null) {
+    args.push("-t", durationSec.toFixed(3));
+  }
+  args.push(
+    "-vn",
+    "-sn",
+    "-dn",
+    "-c:a",
+    "aac",
+    "-b:a",
+    `${bitrate}k`,
+    "-ar",
+    "44100",
+    "-ac",
+    "2",
+    "-movflags",
+    "+faststart",
+    params.outputPath
+  );
+
+  await runBinary("ffmpeg", args);
+}

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { withBasePath } from "@/lib/base-path";
+import { getPublicPreviewUrlPath } from "@/lib/public-preview";
 
 export type AudioKind = "upload" | "generated";
 export type SourceType = "master" | "clip";
@@ -130,6 +131,7 @@ export interface CollectionClipItem {
   clipName: string;
   sourceId: string;
   url: string;
+  playbackUrl: string;
   startSec: number;
   endSec: number | null;
   sortOrder: number;
@@ -489,6 +491,7 @@ function mapCollectionForOutput(params: {
         clipName: clip.name,
         sourceId: clip.sourceAudioId,
         url: withBasePath(`/api/public/files/${audio.id}`),
+        playbackUrl: withBasePath(getPublicPreviewUrlPath(clip.id)),
         startSec: clip.startSec,
         endSec: clip.endSec,
         sortOrder: item.sortOrder
@@ -894,6 +897,11 @@ export async function addGeneratedAudio(params: {
 export async function findAudioById(id: string): Promise<AudioRecord | null> {
   const store = await readStore();
   return store.records.find((record) => record.id === id) ?? null;
+}
+
+export async function findClipById(id: string): Promise<ClipRecord | null> {
+  const store = await readStore();
+  return store.clips.find((clip) => clip.id === id) ?? null;
 }
 
 export async function registerUploadedAudioToSong(params: {

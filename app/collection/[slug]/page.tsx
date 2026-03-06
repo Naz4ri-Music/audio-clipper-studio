@@ -13,6 +13,7 @@ interface PublicCollectionClip {
   clipName: string;
   sourceId: string;
   url: string;
+  playbackUrl?: string;
   startSec: number;
   endSec: number | null;
   sortOrder: number;
@@ -35,6 +36,10 @@ interface PlaybackRuntime {
   sources: AudioBufferSourceNode[];
   timeoutIds: number[];
   intervalId: number | null;
+}
+
+interface AudioSessionLike {
+  type?: string;
 }
 
 const IDLE_PLAYBACK: PlaybackState = {
@@ -142,6 +147,33 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     return created;
   }, []);
 
+  const unlockPlaybackContext = useCallback(async (): Promise<AudioContext> => {
+    // On iOS Safari this can force media playback even when the hardware silent switch is enabled.
+    const navWithSession = navigator as Navigator & { audioSession?: AudioSessionLike };
+    try {
+      if (navWithSession.audioSession) {
+        navWithSession.audioSession.type = "playback";
+      }
+    } catch {
+      // Ignore if not supported or blocked by the browser.
+    }
+
+    const context = getPlaybackContext();
+    if (context.state !== "running") {
+      await context.resume();
+    }
+
+    // iOS Safari can require a real source start on user gesture to fully unlock audio output.
+    const unlockSource = context.createBufferSource();
+    unlockSource.buffer = context.createBuffer(1, 1, context.sampleRate);
+    unlockSource.connect(context.destination);
+    unlockSource.start();
+    unlockSource.stop(context.currentTime + 0.001);
+    unlockSource.disconnect();
+
+    return context;
+  }, [getPlaybackContext]);
+
   const getCachedAudioBuffer = useCallback(
     (cacheKey: string, url: string): Promise<AudioBuffer> => {
       const cached = audioBufferCacheRef.current.get(cacheKey);
@@ -216,6 +248,32 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
   }, [getCachedAudioBuffer, useCountdown]);
 
   useEffect(() => {
+    if (!orderedClips.length) {
+      return;
+    }
+
+    let cancelled = false;
+    const prebuffer = async (): Promise<void> => {
+      for (const clip of orderedClips) {
+        if (cancelled) {
+          break;
+        }
+        const clipPlaybackUrl = clip.playbackUrl || clip.url;
+        try {
+          await getCachedAudioBuffer(`audio:${clip.clipId}`, clipPlaybackUrl);
+        } catch {
+          // Best effort cache.
+        }
+      }
+    };
+
+    void prebuffer();
+    return () => {
+      cancelled = true;
+    };
+  }, [getCachedAudioBuffer, orderedClips]);
+
+  useEffect(() => {
     return () => {
       stopPlayback();
       audioBufferCacheRef.current.clear();
@@ -250,14 +308,13 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       };
       playbackRuntimeRef.current = runtime;
 
-      const context = getPlaybackContext();
+      const context = await unlockPlaybackContext();
       try {
-        await context.resume();
+        if (context.state !== "running") {
+          throw new Error("Pulsa Play de nuevo para activar el audio del navegador.");
+        }
       } catch {
         throw new Error("No se pudo activar el audio en este dispositivo.");
-      }
-      if (context.state !== "running") {
-        throw new Error("Pulsa Play de nuevo para activar el audio del navegador.");
       }
 
       const setPlaybackIfActive = (next: PlaybackState) => {
@@ -272,7 +329,16 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       };
 
       try {
-        const clipBuffer = await getCachedAudioBuffer(`audio:${clip.sourceId}`, clip.url);
+        const clipPlaybackUrl = clip.playbackUrl || clip.url;
+        let clipBuffer: AudioBuffer;
+        try {
+          clipBuffer = await getCachedAudioBuffer(`audio:${clip.clipId}`, clipPlaybackUrl);
+        } catch (previewError) {
+          if (!clip.playbackUrl || clipPlaybackUrl === clip.url) {
+            throw previewError;
+          }
+          clipBuffer = await getCachedAudioBuffer(`audio:${clip.clipId}:fallback`, clip.url);
+        }
         if (signal.aborted) {
           throw new DOMException("Cancelled", "AbortError");
         }
@@ -288,8 +354,14 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
           throw new DOMException("Cancelled", "AbortError");
         }
 
-        const clipStartSec = clamp(clip.startSec, 0, Math.max(0, clipBuffer.duration - 0.01));
-        const requestedClipEndSec = clip.endSec !== null ? Math.max(clip.endSec, clipStartSec + 0.01) : clipBuffer.duration;
+        const usesTrimmedPreview = Boolean(clip.playbackUrl);
+        const clipStartSec = usesTrimmedPreview
+          ? 0
+          : clamp(clip.startSec, 0, Math.max(0, clipBuffer.duration - 0.01));
+        const requestedClipEndSec =
+          usesTrimmedPreview || clip.endSec === null
+            ? clipBuffer.duration
+            : Math.max(clip.endSec, clipStartSec + 0.01);
         const clipEndSec = clamp(requestedClipEndSec, clipStartSec + 0.01, clipBuffer.duration);
         const clipDurationSec = Math.max(0.01, clipEndSec - clipStartSec);
 
@@ -390,7 +462,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
         }
       }
     },
-    [clearPlaybackRuntime, delaySec, getCachedAudioBuffer, getPlaybackContext, stopPlayback, useCountdown]
+    [clearPlaybackRuntime, delaySec, getCachedAudioBuffer, stopPlayback, unlockPlaybackContext, useCountdown]
   );
 
   return (

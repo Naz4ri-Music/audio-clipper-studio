@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { addClipToCollection } from "@/lib/storage";
+import { ensurePublicClipPreview } from "@/lib/public-preview";
+import { addClipToCollection, findAudioById, findClipById } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
@@ -22,10 +23,20 @@ export async function POST(
       clipId: body.clipId
     });
 
+    const clip = await findClipById(body.clipId);
+    if (clip) {
+      const source = await findAudioById(clip.sourceAudioId);
+      if (source) {
+        await ensurePublicClipPreview({
+          clip,
+          sourcePath: source.path
+        });
+      }
+    }
+
     return NextResponse.json({ item });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Error desconocido";
     return NextResponse.json({ error: `No se pudo añadir el clip: ${message}` }, { status: 500 });
   }
 }
-
