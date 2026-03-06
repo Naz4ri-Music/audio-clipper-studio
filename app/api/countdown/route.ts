@@ -4,6 +4,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createAudioStreamResponse } from "@/lib/audio-response";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const countdownPath = path.join(process.cwd(), "cuenta atras.wav");

@@ -4,6 +4,8 @@ import { createAudioStreamResponse } from "@/lib/audio-response";
 import { findAudioById } from "@/lib/storage";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 export async function GET(
   request: NextRequest,
@@ -27,7 +29,8 @@ export async function GET(
       contentType: record.mimeType,
       downloadName: shouldDownload ? requestedName : undefined
     });
-  } catch {
-    return NextResponse.json({ error: "No se pudo leer el archivo" }, { status: 500 });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Error desconocido";
+    return NextResponse.json({ error: `No se pudo leer el archivo: ${message}` }, { status: 500 });
   }
 }

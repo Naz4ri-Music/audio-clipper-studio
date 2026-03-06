@@ -4,7 +4,7 @@ import { type DragEvent as ReactDragEvent, type MouseEvent, useCallback, useEffe
 import { withBasePath } from "@/lib/base-path";
 
 type SourceType = "master" | "clip";
-type PlaybackPhase = "idle" | "delay" | "countdown" | "clip";
+type PlaybackPhase = "idle" | "loading" | "delay" | "countdown" | "clip";
 
 interface LibraryAudio {
   id: string;
@@ -97,6 +97,75 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 25000
+): Promise<Response> {
+  const controller = new AbortController();
+  const externalSignal = init.signal;
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+  }
+
+  const timeoutId = window.setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      credentials: "same-origin",
+      signal: controller.signal
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+async function parseJsonResponse<T>(response: Response): Promise<T> {
+  const raw = await response.text();
+  if (!raw) {
+    return {} as T;
+  }
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    throw new Error(`Respuesta inválida del servidor (${response.status})`);
+  }
+}
+
+async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    throw new DOMException("Cancelled", "AbortError");
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(new DOMException("Cancelled", "AbortError"));
+    };
+
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    void promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
 function baseName(filename: string): string {
   return filename.replace(/\.[^.]+$/, "");
 }
@@ -146,33 +215,9 @@ async function extractWaveform(buffer: ArrayBuffer): Promise<{ peaks: number[]; 
 }
 
 interface PlaybackRuntime {
-  context: AudioContext;
   sources: AudioBufferSourceNode[];
   timeoutIds: number[];
   intervalId: number | null;
-}
-
-async function fetchDecodedAudioBuffer(params: {
-  context: AudioContext;
-  url: string;
-  signal: AbortSignal;
-}): Promise<AudioBuffer> {
-  const response = await fetch(params.url, { signal: params.signal, cache: "no-store" });
-  if (!response.ok) {
-    throw new Error("No se pudo cargar el audio");
-  }
-
-  const payload = await response.arrayBuffer();
-  if (params.signal.aborted) {
-    throw new DOMException("Cancelled", "AbortError");
-  }
-
-  const decoded = await params.context.decodeAudioData(payload.slice(0));
-  if (params.signal.aborted) {
-    throw new DOMException("Cancelled", "AbortError");
-  }
-
-  return decoded;
 }
 
 function detectEffectiveDuration(buffer: AudioBuffer): number {
@@ -238,6 +283,8 @@ export function ClipStudio(): JSX.Element {
   const [playback, setPlayback] = useState<PlaybackState>(IDLE_PLAYBACK);
   const playbackControllerRef = useRef<AbortController | null>(null);
   const playbackRuntimeRef = useRef<PlaybackRuntime | null>(null);
+  const playbackContextRef = useRef<AudioContext | null>(null);
+  const audioBufferCacheRef = useRef<Map<string, Promise<AudioBuffer>>>(new Map());
 
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [previewPositionSec, setPreviewPositionSec] = useState(0);
@@ -335,10 +382,53 @@ export function ClipStudio(): JSX.Element {
     });
 
     playbackRuntimeRef.current = null;
-    void runtime.context.close().catch(() => {
-      // Context could already be closed.
-    });
   }, []);
+
+  const getPlaybackContext = useCallback((): AudioContext => {
+    const existing = playbackContextRef.current;
+    if (existing) {
+      return existing;
+    }
+
+    const created = new AudioContext();
+    playbackContextRef.current = created;
+    return created;
+  }, []);
+
+  const getCachedAudioBuffer = useCallback(
+    (cacheKey: string, url: string): Promise<AudioBuffer> => {
+      const cached = audioBufferCacheRef.current.get(cacheKey);
+      if (cached) {
+        return cached;
+      }
+
+      const loadPromise = (async () => {
+        const context = getPlaybackContext();
+        const response = await fetchWithTimeout(url, { cache: "no-store" }, 45000);
+        if (!response.ok) {
+          const details = await response.text();
+          throw new Error(
+            `No se pudo cargar el audio (${response.status})${details ? `: ${details.slice(0, 120)}` : ""}`
+          );
+        }
+
+        const payload = await response.arrayBuffer();
+        return context.decodeAudioData(payload.slice(0));
+      })();
+
+      audioBufferCacheRef.current.set(cacheKey, loadPromise);
+
+      void loadPromise.catch(() => {
+        const current = audioBufferCacheRef.current.get(cacheKey);
+        if (current === loadPromise) {
+          audioBufferCacheRef.current.delete(cacheKey);
+        }
+      });
+
+      return loadPromise;
+    },
+    [getPlaybackContext]
+  );
 
   const stopPlayback = useCallback(() => {
     playbackControllerRef.current?.abort();
@@ -465,11 +555,11 @@ export function ClipStudio(): JSX.Element {
 
   const refreshLibrary = useCallback(
     async (preferredSongId?: string) => {
-      const response = await fetch(withBasePath("/api/library"), { cache: "no-store" });
-      const data = (await response.json()) as {
+      const response = await fetchWithTimeout(withBasePath("/api/library"), { cache: "no-store" }, 15000);
+      const data = await parseJsonResponse<{
         library?: LibraryPayload;
         error?: string;
-      };
+      }>(response);
 
       if (!response.ok || !data.library) {
         throw new Error(data.error || "No se pudo cargar la biblioteca");
@@ -625,12 +715,17 @@ export function ClipStudio(): JSX.Element {
     }
 
     let cancelled = false;
+    const controller = new AbortController();
     setIsAnalyzingWave(true);
+    setErrorMessage(null);
 
-    void fetch(currentMaster.url)
+    void fetchWithTimeout(currentMaster.url, { cache: "no-store", signal: controller.signal }, 25000)
       .then(async (response) => {
         if (!response.ok) {
-          throw new Error("No se pudo cargar el audio del master");
+          const details = await response.text();
+          throw new Error(
+            `No se pudo cargar el audio del master (${response.status})${details ? `: ${details.slice(0, 120)}` : ""}`
+          );
         }
         return response.arrayBuffer();
       })
@@ -644,9 +739,14 @@ export function ClipStudio(): JSX.Element {
         setWaveDurationSec(result.durationSec);
         setWaveformSourceKey(currentMaster.id);
       })
-      .catch(() => {
+      .catch((error) => {
         if (cancelled) {
           return;
+        }
+
+        if (!isAbortError(error)) {
+          const message = error instanceof Error ? error.message : "No se pudo analizar la forma de onda del master";
+          setErrorMessage(message);
         }
 
         setWaveform([]);
@@ -660,6 +760,7 @@ export function ClipStudio(): JSX.Element {
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [currentMaster, stopPreview, waveformSourceKey]);
 
@@ -748,6 +849,26 @@ export function ClipStudio(): JSX.Element {
   }, [selectedSongId, selectedSong, stopPlayback, stopPreview]);
 
   useEffect(() => {
+    if (!selectedSong?.master) {
+      return;
+    }
+
+    void getCachedAudioBuffer(`audio:${selectedSong.master.id}`, selectedSong.master.url).catch(() => {
+      // Keep UX resilient even if preload fails; playback path handles explicit errors.
+    });
+  }, [getCachedAudioBuffer, selectedSong?.master]);
+
+  useEffect(() => {
+    if (!useCountdown) {
+      return;
+    }
+
+    void getCachedAudioBuffer("countdown", withBasePath("/api/countdown")).catch(() => {
+      // Optional preload; runtime playback will report the error if needed.
+    });
+  }, [getCachedAudioBuffer, useCountdown]);
+
+  useEffect(() => {
     return () => {
       stopPlayback();
       const audio = previewAudioRef.current;
@@ -760,6 +881,15 @@ export function ClipStudio(): JSX.Element {
       }
       previewAudioRef.current = null;
       previewPlayingRef.current = false;
+
+      audioBufferCacheRef.current.clear();
+      const context = playbackContextRef.current;
+      playbackContextRef.current = null;
+      if (context) {
+        void context.close().catch(() => {
+          // Context could already be closed.
+        });
+      }
     };
   }, [stopPlayback]);
 
@@ -1015,7 +1145,7 @@ export function ClipStudio(): JSX.Element {
     resetMessages();
 
     try {
-      const response = await fetch(withBasePath("/api/clips"), {
+      const response = await fetchWithTimeout(withBasePath("/api/clips"), {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -1027,12 +1157,12 @@ export function ClipStudio(): JSX.Element {
           startSec,
           endSec
         })
-      });
+      }, 20000);
 
-      const data = (await response.json()) as {
+      const data = await parseJsonResponse<{
         clip?: { id: string };
         error?: string;
-      };
+      }>(response);
 
       if (!response.ok || !data.clip) {
         throw new Error(data.error || "No se pudo crear el clip");
@@ -1081,13 +1211,17 @@ export function ClipStudio(): JSX.Element {
       stopPreview(true);
       stopPlayback();
       setErrorMessage(null);
+      setPlayback({
+        clipId: clip.id,
+        phase: "loading",
+        remainingDelay: 0
+      });
 
       const controller = new AbortController();
       playbackControllerRef.current = controller;
       const signal = controller.signal;
-      const context = new AudioContext();
+      const context = getPlaybackContext();
       const runtime: PlaybackRuntime = {
-        context,
         sources: [],
         timeoutIds: [],
         intervalId: null
@@ -1106,11 +1240,12 @@ export function ClipStudio(): JSX.Element {
       };
 
       try {
-        const clipBuffer = await fetchDecodedAudioBuffer({
-          context,
-          url: clip.url,
-          signal
-        });
+        const clipBufferPromise = getCachedAudioBuffer(`audio:${clip.sourceId}`, clip.url);
+        const countdownBufferPromise = useCountdown
+          ? getCachedAudioBuffer("countdown", withBasePath("/api/countdown"))
+          : Promise.resolve(null);
+
+        const clipBuffer = await awaitWithAbort(clipBufferPromise, signal);
 
         if (clipBuffer.duration <= 0.01) {
           throw new Error("El clip es demasiado corto para reproducir.");
@@ -1125,11 +1260,10 @@ export function ClipStudio(): JSX.Element {
         let countdownDurationSec = 0;
 
         if (useCountdown) {
-          countdownBuffer = await fetchDecodedAudioBuffer({
-            context,
-            url: withBasePath("/api/countdown"),
-            signal
-          });
+          countdownBuffer = await awaitWithAbort(countdownBufferPromise, signal);
+          if (!countdownBuffer) {
+            throw new Error("No se pudo cargar la cuenta atrás.");
+          }
           countdownDurationSec = Math.min(countdownBuffer.duration, detectEffectiveDuration(countdownBuffer));
         }
 
@@ -1233,7 +1367,7 @@ export function ClipStudio(): JSX.Element {
         }
       }
     },
-    [clearPlaybackRuntime, delaySec, stopPlayback, stopPreview, useCountdown]
+    [clearPlaybackRuntime, delaySec, getCachedAudioBuffer, getPlaybackContext, stopPlayback, stopPreview, useCountdown]
   );
 
   const downloadClip = async (clip: LibraryClip, applyGlobalSettings: boolean) => {
@@ -1493,7 +1627,9 @@ export function ClipStudio(): JSX.Element {
                   const isCurrent = playback.clipId === clip.id && playback.phase !== "idle";
                   const clipDuration = safeDuration(clip.endSec, clip.startSec);
                   const playbackStatus =
-                    isCurrent && playback.phase === "delay"
+                    isCurrent && playback.phase === "loading"
+                      ? "Cargando audio..."
+                      : isCurrent && playback.phase === "delay"
                       ? `Empieza en ${playback.remainingDelay}...`
                       : isCurrent && playback.phase === "countdown"
                         ? "Reproduciendo cuenta atrás..."
