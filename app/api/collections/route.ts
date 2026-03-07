@@ -8,6 +8,7 @@ export const revalidate = 0;
 interface CreateBody {
   name?: string;
   slug?: string | null;
+  allowDownloads?: boolean;
 }
 
 export async function GET(): Promise<NextResponse> {
@@ -32,16 +33,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const body = (await request.json()) as CreateBody;
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const slug = typeof body.slug === "string" ? body.slug : null;
+    const allowDownloads = body.allowDownloads === true;
 
     if (!name) {
       return NextResponse.json({ error: "El nombre de la colección es obligatorio" }, { status: 400 });
     }
 
-    const collection = await createCollection({ name, slug });
+    const collection = await createCollection({ name, slug, allowDownloads });
     return NextResponse.json({ collection });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Error desconocido";
     return NextResponse.json({ error: `No se pudo crear la colección: ${message}` }, { status: 500 });
   }
 }
-

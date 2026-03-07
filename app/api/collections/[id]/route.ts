@@ -6,6 +6,7 @@ export const runtime = "nodejs";
 interface UpdateBody {
   name?: string;
   slug?: string;
+  allowDownloads?: boolean;
 }
 
 export async function PATCH(
@@ -17,7 +18,8 @@ export async function PATCH(
     const collection = await updateCollection({
       collectionId: context.params.id,
       name: typeof body.name === "string" ? body.name : undefined,
-      slug: typeof body.slug === "string" ? body.slug : undefined
+      slug: typeof body.slug === "string" ? body.slug : undefined,
+      allowDownloads: typeof body.allowDownloads === "boolean" ? body.allowDownloads : undefined
     });
 
     return NextResponse.json({ collection });
@@ -42,4 +44,3 @@ export async function DELETE(
     return NextResponse.json({ error: `No se pudo eliminar la colección: ${message}` }, { status: 500 });
   }
 }
-

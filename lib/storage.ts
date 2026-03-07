@@ -48,6 +48,7 @@ export interface CollectionRecord {
   id: string;
   name: string;
   slug: string;
+  allowDownloads: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -74,7 +75,7 @@ interface LegacyStore {
 }
 
 interface AudioStore {
-  version: 3;
+  version: 4;
   records: AudioRecord[];
   folders: FolderRecord[];
   songs: SongRecord[];
@@ -132,6 +133,7 @@ export interface CollectionClipItem {
   sourceId: string;
   url: string;
   playbackUrl: string;
+  downloadUrl: string;
   startSec: number;
   endSec: number | null;
   sortOrder: number;
@@ -141,6 +143,7 @@ export interface CollectionItem {
   id: string;
   name: string;
   slug: string;
+  allowDownloads: boolean;
   createdAt: string;
   updatedAt: string;
   clips: CollectionClipItem[];
@@ -152,7 +155,7 @@ const GENERATED_DIR = path.join(DATA_DIR, "generated");
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 
 const EMPTY_STORE: AudioStore = {
-  version: 3,
+  version: 4,
   records: [],
   folders: [],
   songs: [],
@@ -160,6 +163,17 @@ const EMPTY_STORE: AudioStore = {
   collections: [],
   collectionClips: []
 };
+
+type CollectionRecordInput = Omit<CollectionRecord, "allowDownloads"> & {
+  allowDownloads?: boolean;
+};
+
+function normalizeCollectionRecords(records: CollectionRecordInput[]): CollectionRecord[] {
+  return records.map((record) => ({
+    ...record,
+    allowDownloads: record.allowDownloads === true
+  }));
+}
 
 function normalizeExtension(originalName: string, mimeType: string): string {
   const ext = path.extname(originalName || "").toLowerCase();
@@ -265,7 +279,7 @@ function migrateLegacyStore(parsed: LegacyStore): AudioStore {
   }
 
   return {
-    version: 3,
+    version: 4,
     records: legacyRecords,
     folders: [],
     songs,
@@ -282,7 +296,7 @@ function parseStore(raw: string): AudioStore {
     if (
       typeof parsed === "object" &&
       parsed !== null &&
-      (parsed as Partial<AudioStore>).version === 3 &&
+      (parsed as Partial<AudioStore>).version === 4 &&
       Array.isArray((parsed as Partial<AudioStore>).records) &&
       Array.isArray((parsed as Partial<AudioStore>).folders) &&
       Array.isArray((parsed as Partial<AudioStore>).songs) &&
@@ -290,7 +304,45 @@ function parseStore(raw: string): AudioStore {
       Array.isArray((parsed as Partial<AudioStore>).collections) &&
       Array.isArray((parsed as Partial<AudioStore>).collectionClips)
     ) {
-      return parsed as AudioStore;
+      const normalizedCollections = normalizeCollectionRecords(
+        (parsed as Partial<AudioStore>).collections as CollectionRecordInput[]
+      );
+
+      return {
+        ...(parsed as AudioStore),
+        collections: normalizedCollections
+      };
+    }
+
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { version?: number }).version === 3 &&
+      Array.isArray((parsed as Partial<AudioStore>).records) &&
+      Array.isArray((parsed as Partial<AudioStore>).folders) &&
+      Array.isArray((parsed as Partial<AudioStore>).songs) &&
+      Array.isArray((parsed as Partial<AudioStore>).clips) &&
+      Array.isArray((parsed as Partial<AudioStore>).collections) &&
+      Array.isArray((parsed as Partial<AudioStore>).collectionClips)
+    ) {
+      const migratedV3 = parsed as unknown as {
+        records: AudioRecord[];
+        folders: FolderRecord[];
+        songs: SongRecord[];
+        clips: ClipRecord[];
+        collections: CollectionRecordInput[];
+        collectionClips: CollectionClipRecord[];
+      };
+
+      return {
+        version: 4,
+        records: migratedV3.records,
+        folders: migratedV3.folders,
+        songs: migratedV3.songs,
+        clips: migratedV3.clips,
+        collections: normalizeCollectionRecords(migratedV3.collections),
+        collectionClips: migratedV3.collectionClips
+      };
     }
 
     if (
@@ -310,7 +362,7 @@ function parseStore(raw: string): AudioStore {
       };
 
       return {
-        version: 3,
+        version: 4,
         records: migrated.records,
         folders: migrated.folders,
         songs: migrated.songs,
@@ -330,8 +382,17 @@ async function readStore(): Promise<AudioStore> {
   await ensureStoreFile();
   const raw = await readFile(STORE_PATH, "utf-8");
   const store = parseStore(raw);
+  let requiresMigrationWrite = false;
+  try {
+    const parsed = JSON.parse(raw) as { version?: number; collections?: CollectionRecordInput[] };
+    const hasInvalidCollections =
+      Array.isArray(parsed.collections) && parsed.collections.some((collection) => typeof collection.allowDownloads !== "boolean");
+    requiresMigrationWrite = parsed.version !== 4 || hasInvalidCollections;
+  } catch {
+    requiresMigrationWrite = true;
+  }
 
-  if (!raw.includes('"version": 3')) {
+  if (requiresMigrationWrite) {
     await writeStore(store);
   }
 
@@ -490,8 +551,9 @@ function mapCollectionForOutput(params: {
         songName: song.name,
         clipName: clip.name,
         sourceId: clip.sourceAudioId,
-        url: withBasePath(`/api/public/files/${audio.id}`),
+        url: withBasePath(`/api/public/collections/${params.collection.slug}/clips/${clip.id}/source`),
         playbackUrl: withBasePath(getPublicPreviewUrlPath(clip.id)),
+        downloadUrl: withBasePath(`/api/public/collections/${params.collection.slug}/clips/${clip.id}/download`),
         startSec: clip.startSec,
         endSec: clip.endSec,
         sortOrder: item.sortOrder
@@ -503,6 +565,7 @@ function mapCollectionForOutput(params: {
     id: params.collection.id,
     name: params.collection.name,
     slug: params.collection.slug,
+    allowDownloads: params.collection.allowDownloads,
     createdAt: params.collection.createdAt,
     updatedAt: params.collection.updatedAt,
     clips
@@ -548,9 +611,57 @@ export async function getPublicCollectionBySlug(slug: string): Promise<Collectio
   });
 }
 
+export interface PublicCollectionClipAudioAccess {
+  collection: CollectionRecord;
+  clip: ClipRecord;
+  song: SongRecord;
+  audio: AudioRecord;
+}
+
+export async function findPublicCollectionClipAudioBySlug(params: {
+  slug: string;
+  clipId: string;
+}): Promise<PublicCollectionClipAudioAccess | null> {
+  const store = await readStore();
+  const collection = store.collections.find((item) => item.slug === params.slug);
+  if (!collection) {
+    return null;
+  }
+
+  const includedClip = store.collectionClips.some(
+    (item) => item.collectionId === collection.id && item.clipId === params.clipId
+  );
+  if (!includedClip) {
+    return null;
+  }
+
+  const clip = store.clips.find((item) => item.id === params.clipId);
+  if (!clip) {
+    return null;
+  }
+
+  const song = store.songs.find((item) => item.id === clip.songId);
+  if (!song) {
+    return null;
+  }
+
+  const audio = store.records.find((item) => item.id === clip.sourceAudioId);
+  if (!audio) {
+    return null;
+  }
+
+  return {
+    collection,
+    clip,
+    song,
+    audio
+  };
+}
+
 export async function createCollection(params: {
   name: string;
   slug?: string | null;
+  allowDownloads?: boolean;
 }): Promise<CollectionRecord> {
   const store = await readStore();
   const name = sanitizeRequiredName(params.name, "Colección");
@@ -564,6 +675,7 @@ export async function createCollection(params: {
     id: randomUUID(),
     name,
     slug,
+    allowDownloads: params.allowDownloads === true,
     createdAt: now,
     updatedAt: now
   };
@@ -577,6 +689,7 @@ export async function updateCollection(params: {
   collectionId: string;
   name?: string | null;
   slug?: string | null;
+  allowDownloads?: boolean;
 }): Promise<CollectionRecord> {
   const store = await readStore();
   const collection = store.collections.find((item) => item.id === params.collectionId);
@@ -592,6 +705,10 @@ export async function updateCollection(params: {
     const requested = slugify(params.slug);
     const existingSlugs = new Set(store.collections.filter((item) => item.id !== collection.id).map((item) => item.slug));
     collection.slug = uniqueCollectionSlug(requested, existingSlugs);
+  }
+
+  if (typeof params.allowDownloads === "boolean") {
+    collection.allowDownloads = params.allowDownloads;
   }
 
   collection.updatedAt = new Date().toISOString();

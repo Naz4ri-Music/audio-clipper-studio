@@ -63,6 +63,7 @@ interface CollectionItem {
   id: string;
   name: string;
   slug: string;
+  allowDownloads: boolean;
   createdAt: string;
   updatedAt: string;
   clips: CollectionClipLink[];
@@ -1288,6 +1289,26 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
+  const setCollectionDownloadsAction = async (collection: CollectionItem, allowDownloads: boolean) => {
+    try {
+      resetMessages();
+      const response = await fetch(withBasePath(`/api/collections/${collection.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowDownloads })
+      });
+      const data = (await response.json()) as { collection?: { id: string }; error?: string };
+      if (!response.ok || !data.collection) {
+        throw new Error(data.error || "No se pudo actualizar la opción de descargas");
+      }
+      await refreshCollections();
+      setInfoMessage(allowDownloads ? "Descargas habilitadas para la colección." : "Descargas deshabilitadas.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo actualizar la colección";
+      setErrorMessage(message);
+    }
+  };
+
   const addClipToCollectionAction = async (collectionId: string, clipId: string) => {
     try {
       resetMessages();
@@ -2043,18 +2064,36 @@ export function ClipStudio(): JSX.Element {
         <label className="field-label" htmlFor="delay-sec">
           Delay extra (segundos)
         </label>
-        <input
-          id="delay-sec"
-          type="number"
-          min={0}
-          step={1}
-          className="number-input"
-          value={delaySec}
-          onChange={(event) => {
-            const nextValue = Number.parseInt(event.target.value, 10);
-            setDelaySec(Number.isFinite(nextValue) && nextValue >= 0 ? nextValue : 0);
-          }}
-        />
+        <div className="number-stepper">
+          <button
+            type="button"
+            className="btn btn-ghost stepper-btn"
+            aria-label="Restar un segundo de delay"
+            onClick={() => setDelaySec((current) => Math.max(0, current - 1))}
+          >
+            -
+          </button>
+          <input
+            id="delay-sec"
+            type="number"
+            min={0}
+            step={1}
+            className="number-input"
+            value={delaySec}
+            onChange={(event) => {
+              const nextValue = Number.parseInt(event.target.value, 10);
+              setDelaySec(Number.isFinite(nextValue) && nextValue >= 0 ? nextValue : 0);
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn-ghost stepper-btn"
+            aria-label="Sumar un segundo de delay"
+            onClick={() => setDelaySec((current) => current + 1)}
+          >
+            +
+          </button>
+        </div>
 
         <div className="small-note">
           Stop corta todo. El siguiente Play vuelve a empezar desde cero (delay + cuenta atrás + clip).
@@ -2216,6 +2255,15 @@ export function ClipStudio(): JSX.Element {
                     <strong>{collection.name}</strong>
                     <span className="small-note">/{collection.slug}</span>
                   </div>
+
+                  <label className="checkbox-line">
+                    <input
+                      type="checkbox"
+                      checked={collection.allowDownloads}
+                      onChange={(event) => void setCollectionDownloadsAction(collection, event.target.checked)}
+                    />
+                    Permitir descargas en colección pública
+                  </label>
 
                   <div className="collection-actions">
                     <button type="button" className="btn btn-ghost" onClick={() => void renameCollectionAction(collection)}>

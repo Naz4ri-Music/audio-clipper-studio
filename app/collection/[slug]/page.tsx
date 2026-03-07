@@ -14,6 +14,7 @@ interface PublicCollectionClip {
   sourceId: string;
   url: string;
   playbackUrl?: string;
+  downloadUrl: string;
   startSec: number;
   endSec: number | null;
   sortOrder: number;
@@ -23,6 +24,7 @@ interface PublicCollection {
   id: string;
   name: string;
   slug: string;
+  allowDownloads: boolean;
   clips: PublicCollectionClip[];
 }
 
@@ -33,6 +35,7 @@ interface PlaybackState {
 }
 
 interface PlaybackRuntime {
+  context: AudioContext;
   sources: AudioBufferSourceNode[];
   timeoutIds: number[];
   intervalId: number | null;
@@ -69,6 +72,24 @@ function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
 }
 
+function extractFilename(contentDisposition: string | null): string | null {
+  if (!contentDisposition) {
+    return null;
+  }
+
+  const encodedMatch = /filename\*=UTF-8''([^;]+)/i.exec(contentDisposition);
+  if (encodedMatch?.[1]) {
+    try {
+      return decodeURIComponent(encodedMatch[1]);
+    } catch {
+      // Ignore malformed encoding.
+    }
+  }
+
+  const plainMatch = /filename="?([^";]+)"?/i.exec(contentDisposition);
+  return plainMatch?.[1] ?? null;
+}
+
 async function fetchWithTimeout(url: string, timeoutMs = 45000): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => {
@@ -93,17 +114,30 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
 
   const [useCountdown, setUseCountdown] = useState(true);
   const [delaySec, setDelaySec] = useState(0);
+  const [showDownloads, setShowDownloads] = useState(false);
+  const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null);
+
   const [playback, setPlayback] = useState<PlaybackState>(IDLE_PLAYBACK);
 
   const playbackControllerRef = useRef<AbortController | null>(null);
   const playbackRuntimeRef = useRef<PlaybackRuntime | null>(null);
-  const playbackContextRef = useRef<AudioContext | null>(null);
-  const audioBufferCacheRef = useRef<Map<string, Promise<AudioBuffer>>>(new Map());
+  const audioPayloadCacheRef = useRef<Map<string, Promise<ArrayBuffer>>>(new Map());
 
   const orderedClips = useMemo(
     () => [...(collection?.clips ?? [])].sort((a, b) => a.sortOrder - b.sortOrder),
     [collection?.clips]
   );
+
+  const configureAudioSession = useCallback(() => {
+    const navWithSession = navigator as Navigator & { audioSession?: AudioSessionLike };
+    try {
+      if (navWithSession.audioSession) {
+        navWithSession.audioSession.type = "playback";
+      }
+    } catch {
+      // Ignore unsupported browsers.
+    }
+  }, []);
 
   const clearPlaybackRuntime = useCallback(() => {
     const runtime = playbackRuntimeRef.current;
@@ -126,7 +160,11 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       source.disconnect();
     });
 
+    const { context } = runtime;
     playbackRuntimeRef.current = null;
+    void context.close().catch(() => {
+      // Ignore.
+    });
   }, []);
 
   const stopPlayback = useCallback(() => {
@@ -136,72 +174,48 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     setPlayback(IDLE_PLAYBACK);
   }, [clearPlaybackRuntime]);
 
-  const getPlaybackContext = useCallback((): AudioContext => {
-    const existing = playbackContextRef.current;
-    if (existing) {
-      return existing;
-    }
+  const unlockPlaybackContext = useCallback(
+    async (context: AudioContext): Promise<void> => {
+      configureAudioSession();
 
-    const created = new AudioContext();
-    playbackContextRef.current = created;
-    return created;
-  }, []);
-
-  const unlockPlaybackContext = useCallback(async (): Promise<AudioContext> => {
-    // On iOS Safari this can force media playback even when the hardware silent switch is enabled.
-    const navWithSession = navigator as Navigator & { audioSession?: AudioSessionLike };
-    try {
-      if (navWithSession.audioSession) {
-        navWithSession.audioSession.type = "playback";
-      }
-    } catch {
-      // Ignore if not supported or blocked by the browser.
-    }
-
-    const context = getPlaybackContext();
-    if (context.state !== "running") {
-      await context.resume();
-    }
-
-    // iOS Safari can require a real source start on user gesture to fully unlock audio output.
-    const unlockSource = context.createBufferSource();
-    unlockSource.buffer = context.createBuffer(1, 1, context.sampleRate);
-    unlockSource.connect(context.destination);
-    unlockSource.start();
-    unlockSource.stop(context.currentTime + 0.001);
-    unlockSource.disconnect();
-
-    return context;
-  }, [getPlaybackContext]);
-
-  const getCachedAudioBuffer = useCallback(
-    (cacheKey: string, url: string): Promise<AudioBuffer> => {
-      const cached = audioBufferCacheRef.current.get(cacheKey);
-      if (cached) {
-        return cached;
+      if (context.state !== "running") {
+        await context.resume();
       }
 
-      const loadPromise = (async () => {
-        const response = await fetchWithTimeout(url, 45000);
-        if (!response.ok) {
-          throw new Error(`No se pudo cargar audio (${response.status}).`);
-        }
-        const buffer = await response.arrayBuffer();
-        return getPlaybackContext().decodeAudioData(buffer.slice(0));
-      })();
-
-      audioBufferCacheRef.current.set(cacheKey, loadPromise);
-      void loadPromise.catch(() => {
-        const current = audioBufferCacheRef.current.get(cacheKey);
-        if (current === loadPromise) {
-          audioBufferCacheRef.current.delete(cacheKey);
-        }
-      });
-
-      return loadPromise;
+      const unlockSource = context.createBufferSource();
+      unlockSource.buffer = context.createBuffer(1, 1, context.sampleRate);
+      unlockSource.connect(context.destination);
+      unlockSource.start();
+      unlockSource.stop(context.currentTime + 0.001);
+      unlockSource.disconnect();
     },
-    [getPlaybackContext]
+    [configureAudioSession]
   );
+
+  const getCachedAudioPayload = useCallback((cacheKey: string, url: string): Promise<ArrayBuffer> => {
+    const cached = audioPayloadCacheRef.current.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const loadPromise = (async () => {
+      const response = await fetchWithTimeout(url, 45000);
+      if (!response.ok) {
+        throw new Error(`No se pudo cargar audio (${response.status}).`);
+      }
+      return response.arrayBuffer();
+    })();
+
+    audioPayloadCacheRef.current.set(cacheKey, loadPromise);
+    void loadPromise.catch(() => {
+      const current = audioPayloadCacheRef.current.get(cacheKey);
+      if (current === loadPromise) {
+        audioPayloadCacheRef.current.delete(cacheKey);
+      }
+    });
+
+    return loadPromise;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -239,13 +253,20 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
   }, [props.params.slug]);
 
   useEffect(() => {
+    if (!collection?.allowDownloads) {
+      setShowDownloads(false);
+    }
+  }, [collection?.allowDownloads]);
+
+  useEffect(() => {
     if (!useCountdown) {
       return;
     }
-    void getCachedAudioBuffer("countdown", "/api/public/countdown").catch(() => {
-      // Preload best effort.
+
+    void getCachedAudioPayload("countdown", "/api/public/countdown").catch(() => {
+      // Best effort preload.
     });
-  }, [getCachedAudioBuffer, useCountdown]);
+  }, [getCachedAudioPayload, useCountdown]);
 
   useEffect(() => {
     if (!orderedClips.length) {
@@ -260,7 +281,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
         }
         const clipPlaybackUrl = clip.playbackUrl || clip.url;
         try {
-          await getCachedAudioBuffer(`audio:${clip.clipId}`, clipPlaybackUrl);
+          await getCachedAudioPayload(`audio:${clip.clipId}`, clipPlaybackUrl);
         } catch {
           // Best effort cache.
         }
@@ -271,21 +292,85 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     return () => {
       cancelled = true;
     };
-  }, [getCachedAudioBuffer, orderedClips]);
+  }, [getCachedAudioPayload, orderedClips]);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        stopPlayback();
+      } else {
+        configureAudioSession();
+      }
+    };
+
+    const onPageShow = () => {
+      stopPlayback();
+      configureAudioSession();
+    };
+
+    const onFocus = () => {
+      configureAudioSession();
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("pageshow", onPageShow);
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("pageshow", onPageShow);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [configureAudioSession, stopPlayback]);
 
   useEffect(() => {
     return () => {
       stopPlayback();
-      audioBufferCacheRef.current.clear();
-      const context = playbackContextRef.current;
-      playbackContextRef.current = null;
-      if (context) {
-        void context.close().catch(() => {
-          // Ignore.
-        });
-      }
+      audioPayloadCacheRef.current.clear();
     };
   }, [stopPlayback]);
+
+  const downloadClip = useCallback(
+    async (clip: PublicCollectionClip) => {
+      if (!collection?.allowDownloads) {
+        return;
+      }
+
+      setDownloadingClipId(clip.clipId);
+      setErrorMessage(null);
+
+      try {
+        const response = await fetchWithTimeout(clip.downloadUrl, 60000);
+        if (!response.ok) {
+          const details = await response.text();
+          throw new Error(
+            `No se pudo descargar el audio (${response.status})${details ? `: ${details.slice(0, 120)}` : ""}`
+          );
+        }
+
+        const blob = await response.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        const fallbackName = `${clip.songName}_${clip.clipName}.mp3`;
+        const filename = extractFilename(response.headers.get("content-disposition")) || fallbackName;
+
+        const link = document.createElement("a");
+        link.href = objectUrl;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+
+        window.setTimeout(() => {
+          URL.revokeObjectURL(objectUrl);
+        }, 2000);
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "No se pudo descargar el audio");
+      } finally {
+        setDownloadingClipId(null);
+      }
+    },
+    [collection?.allowDownloads]
+  );
 
   const playClip = useCallback(
     async (clip: PublicCollectionClip) => {
@@ -302,20 +387,20 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       const signal = controller.signal;
 
       const runtime: PlaybackRuntime = {
+        context: new AudioContext(),
         sources: [],
         timeoutIds: [],
         intervalId: null
       };
       playbackRuntimeRef.current = runtime;
 
-      const context = await unlockPlaybackContext();
-      try {
-        if (context.state !== "running") {
-          throw new Error("Pulsa Play de nuevo para activar el audio del navegador.");
+      const context = runtime.context;
+
+      const ensureActive = () => {
+        if (signal.aborted || playbackControllerRef.current !== controller) {
+          throw new DOMException("Cancelled", "AbortError");
         }
-      } catch {
-        throw new Error("No se pudo activar el audio en este dispositivo.");
-      }
+      };
 
       const setPlaybackIfActive = (next: PlaybackState) => {
         if (playbackControllerRef.current === controller) {
@@ -329,29 +414,37 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       };
 
       try {
+        await unlockPlaybackContext(context);
+        ensureActive();
+
+        if (context.state !== "running") {
+          throw new Error("Pulsa Play de nuevo para activar el audio del navegador.");
+        }
+
+        const decodeBuffer = async (cacheKey: string, url: string): Promise<AudioBuffer> => {
+          const payload = await getCachedAudioPayload(cacheKey, url);
+          ensureActive();
+          return context.decodeAudioData(payload.slice(0));
+        };
+
         const clipPlaybackUrl = clip.playbackUrl || clip.url;
         let clipBuffer: AudioBuffer;
         try {
-          clipBuffer = await getCachedAudioBuffer(`audio:${clip.clipId}`, clipPlaybackUrl);
+          clipBuffer = await decodeBuffer(`audio:${clip.clipId}`, clipPlaybackUrl);
         } catch (previewError) {
           if (!clip.playbackUrl || clipPlaybackUrl === clip.url) {
             throw previewError;
           }
-          clipBuffer = await getCachedAudioBuffer(`audio:${clip.clipId}:fallback`, clip.url);
+          clipBuffer = await decodeBuffer(`audio:${clip.clipId}:fallback`, clip.url);
         }
-        if (signal.aborted) {
-          throw new DOMException("Cancelled", "AbortError");
-        }
+        ensureActive();
 
         let countdownBuffer: AudioBuffer | null = null;
         let countdownDurationSec = 0;
         if (useCountdown) {
-          countdownBuffer = await getCachedAudioBuffer("countdown", "/api/public/countdown");
+          countdownBuffer = await decodeBuffer("countdown", "/api/public/countdown");
           countdownDurationSec = countdownBuffer.duration;
-        }
-
-        if (signal.aborted) {
-          throw new DOMException("Cancelled", "AbortError");
+          ensureActive();
         }
 
         const usesTrimmedPreview = Boolean(clip.playbackUrl);
@@ -387,6 +480,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
               }
               return;
             }
+
             setPlayback({
               clipId: clip.clipId,
               phase: "delay",
@@ -421,6 +515,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
 
         if (context.state !== "running") {
           await context.resume();
+          ensureActive();
         }
 
         if (countdownBuffer) {
@@ -462,7 +557,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
         }
       }
     },
-    [clearPlaybackRuntime, delaySec, getCachedAudioBuffer, stopPlayback, unlockPlaybackContext, useCountdown]
+    [clearPlaybackRuntime, delaySec, getCachedAudioPayload, stopPlayback, unlockPlaybackContext, useCountdown]
   );
 
   return (
@@ -483,18 +578,43 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
         <label className="field-label" htmlFor="public-delay">
           Delay extra (segundos)
         </label>
-        <input
-          id="public-delay"
-          type="number"
-          min={0}
-          step={1}
-          className="number-input"
-          value={delaySec}
-          onChange={(event) => {
-            const next = Number.parseInt(event.target.value, 10);
-            setDelaySec(Number.isFinite(next) && next >= 0 ? next : 0);
-          }}
-        />
+        <div className="number-stepper">
+          <button
+            type="button"
+            className="btn btn-ghost stepper-btn"
+            aria-label="Restar un segundo de delay"
+            onClick={() => setDelaySec((current) => Math.max(0, current - 1))}
+          >
+            -
+          </button>
+          <input
+            id="public-delay"
+            type="number"
+            min={0}
+            step={1}
+            className="number-input"
+            value={delaySec}
+            onChange={(event) => {
+              const next = Number.parseInt(event.target.value, 10);
+              setDelaySec(Number.isFinite(next) && next >= 0 ? next : 0);
+            }}
+          />
+          <button
+            type="button"
+            className="btn btn-ghost stepper-btn"
+            aria-label="Sumar un segundo de delay"
+            onClick={() => setDelaySec((current) => current + 1)}
+          >
+            +
+          </button>
+        </div>
+
+        {collection?.allowDownloads && (
+          <label className="checkbox-line">
+            <input type="checkbox" checked={showDownloads} onChange={(event) => setShowDownloads(event.target.checked)} />
+            Downloads
+          </label>
+        )}
       </section>
 
       <section className="panel">
@@ -525,9 +645,8 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
                     <small>{clip.songName}</small>
                   </div>
                   <p className="clip-meta-row">
-                    Inicio: <strong>{clip.startSec.toFixed(2)}s</strong> · Fin:{" "}
-                    <strong>{clip.endSec?.toFixed(2) ?? "final"}s</strong> · Duración:{" "}
-                    <strong>{formatSeconds(duration)}</strong>
+                    Inicio: <strong>{clip.startSec.toFixed(2)}s</strong> · Fin: <strong>{clip.endSec?.toFixed(2) ?? "final"}s</strong> ·
+                    Duración: <strong>{formatSeconds(duration)}</strong>
                     {status && <span className="playback-pill inline">{status}</span>}
                   </p>
                   <div className="clip-actions">
@@ -540,19 +659,26 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
                         Play
                       </button>
                     )}
+
+                    {collection?.allowDownloads && showDownloads && (
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        disabled={downloadingClipId === clip.clipId}
+                        onClick={() => void downloadClip(clip)}
+                      >
+                        {downloadingClipId === clip.clipId ? "Preparando..." : "Descargar"}
+                      </button>
+                    )}
                   </div>
                 </article>
               );
             })}
           </div>
         )}
-      </section>
 
-      {errorMessage && (
-        <section className="panel feedback-panel">
-          <p className="error-text">{errorMessage}</p>
-        </section>
-      )}
+        {errorMessage && <p className="error-text">{errorMessage}</p>}
+      </section>
     </main>
   );
 }

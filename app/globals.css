@@ -113,6 +113,20 @@ body {
   padding: 0.56rem 0.65rem;
 }
 
+.number-stepper {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.stepper-btn {
+  border-radius: 0.65rem;
+  min-width: 2.35rem;
+  padding: 0.5rem 0.65rem;
+  line-height: 1;
+}
+
 .source-toggle {
   display: grid;
   gap: 0.42rem;
