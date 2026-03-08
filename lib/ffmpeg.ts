@@ -307,3 +307,23 @@ export async function transcodeClipPreviewAac(params: {
 
   await runBinary("ffmpeg", args);
 }
+
+export async function renderClipSegmentWavBuffer(params: {
+  sourcePath: string;
+  startSec: number;
+  endSec: number | null;
+}): Promise<Buffer> {
+  const normalizedStart = Math.max(0, params.startSec || 0);
+  const normalizedEnd =
+    params.endSec !== null && Number.isFinite(params.endSec) ? Math.max(params.endSec, normalizedStart) : null;
+  const durationSec = normalizedEnd !== null ? Math.max(0.05, normalizedEnd - normalizedStart) : null;
+
+  const args = ["-v", "error", "-i", params.sourcePath, "-ss", normalizedStart.toFixed(3)];
+  if (durationSec !== null) {
+    args.push("-t", durationSec.toFixed(3));
+  }
+  args.push("-vn", "-sn", "-dn", "-c:a", "pcm_s16le", "-ar", "44100", "-ac", "2", "-f", "wav", "pipe:1");
+
+  const { stdout } = await runBinaryBuffer("ffmpeg", args);
+  return stdout;
+}

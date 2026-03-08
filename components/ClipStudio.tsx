@@ -189,6 +189,41 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Prom
   });
 }
 
+async function copyTextToClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // Fall back to execCommand for iOS/insecure contexts.
+    }
+  }
+
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.setAttribute("readonly", "");
+  textArea.style.position = "fixed";
+  textArea.style.top = "0";
+  textArea.style.left = "0";
+  textArea.style.width = "1px";
+  textArea.style.height = "1px";
+  textArea.style.opacity = "0";
+  textArea.style.pointerEvents = "none";
+  document.body.appendChild(textArea);
+
+  try {
+    textArea.focus();
+    textArea.select();
+    textArea.setSelectionRange(0, text.length);
+    const copied = document.execCommand("copy");
+    if (!copied) {
+      throw new Error("No se pudo copiar al portapapeles");
+    }
+  } finally {
+    textArea.remove();
+  }
+}
+
 function baseName(filename: string): string {
   return filename.replace(/\.[^.]+$/, "");
 }
@@ -325,6 +360,8 @@ export function ClipStudio(): JSX.Element {
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimeoutRef = useRef<number | null>(null);
 
   const waveformCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const waveDragStateRef = useRef<{
@@ -600,6 +637,17 @@ export function ClipStudio(): JSX.Element {
     setInfoMessage(null);
   };
 
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    if (toastTimeoutRef.current !== null) {
+      window.clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, 2200);
+  }, []);
+
   const refreshCollections = useCallback(async () => {
     const response = await fetchWithTimeout(withBasePath("/api/collections"), { cache: "no-store" }, 15000);
     const data = await parseJsonResponse<{
@@ -755,6 +803,14 @@ export function ClipStudio(): JSX.Element {
       }
     }
   }, [selectedTargetSongId, uploadFolderSongs]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimeoutRef.current !== null) {
+        window.clearTimeout(toastTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!songContextMenu) {
@@ -1351,12 +1407,14 @@ export function ClipStudio(): JSX.Element {
     try {
       const relativePath = withBasePath(`/collection/${slug}`);
       const absoluteUrl = `${window.location.origin}${relativePath}`;
-      await navigator.clipboard.writeText(absoluteUrl);
-      setInfoMessage(`Enlace copiado: ${absoluteUrl}`);
+      await copyTextToClipboard(absoluteUrl);
+      setInfoMessage("Enlace copiado.");
       setErrorMessage(null);
+      showToast("Enlace copiado");
     } catch (error) {
       const message = error instanceof Error ? error.message : "No se pudo copiar el enlace";
       setErrorMessage(message);
+      showToast("No se pudo copiar el enlace");
     }
   };
 
@@ -2635,6 +2693,12 @@ export function ClipStudio(): JSX.Element {
           {errorMessage && <p className="error-text">{errorMessage}</p>}
           {infoMessage && <p className="info-text">{infoMessage}</p>}
         </section>
+      )}
+
+      {toastMessage && (
+        <div className="floating-toast" role="status" aria-live="polite">
+          {toastMessage}
+        </div>
       )}
     </main>
   );

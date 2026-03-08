@@ -122,6 +122,8 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
   const playbackControllerRef = useRef<AbortController | null>(null);
   const playbackRuntimeRef = useRef<PlaybackRuntime | null>(null);
   const audioPayloadCacheRef = useRef<Map<string, Promise<ArrayBuffer>>>(new Map());
+  const audioShieldRef = useRef<HTMLAudioElement | null>(null);
+  const audioShieldStartedRef = useRef(false);
 
   const orderedClips = useMemo(
     () => [...(collection?.clips ?? [])].sort((a, b) => a.sortOrder - b.sortOrder),
@@ -139,6 +141,51 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     }
   }, []);
 
+  const shouldUseAudioShield = useCallback((): boolean => {
+    if (typeof navigator === "undefined") {
+      return false;
+    }
+
+    const ua = navigator.userAgent || "";
+    const isIOSDevice = /iPad|iPhone|iPod/i.test(ua);
+    const isTouchMac = navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+    return isIOSDevice || isTouchMac;
+  }, []);
+
+  const ensureAudioShield = useCallback((): HTMLAudioElement => {
+    const existing = audioShieldRef.current;
+    if (existing) {
+      return existing;
+    }
+
+    const shield = new Audio(withBasePath("/api/public/audio-shield"));
+    shield.preload = "auto";
+    shield.loop = true;
+    shield.volume = 0.00001;
+    shield.setAttribute("playsinline", "true");
+    audioShieldRef.current = shield;
+    return shield;
+  }, []);
+
+  const startAudioShield = useCallback(async (): Promise<void> => {
+    if (!shouldUseAudioShield()) {
+      return;
+    }
+
+    configureAudioSession();
+    const shield = ensureAudioShield();
+    if (!shield.paused) {
+      return;
+    }
+
+    try {
+      await shield.play();
+      audioShieldStartedRef.current = true;
+    } catch {
+      // Requires user gesture; it will be retried on next Play tap.
+    }
+  }, [configureAudioSession, ensureAudioShield, shouldUseAudioShield]);
+
   const clearPlaybackRuntime = useCallback(() => {
     const runtime = playbackRuntimeRef.current;
     if (!runtime) {
@@ -149,13 +196,12 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     if (runtime.intervalId !== null) {
       window.clearInterval(runtime.intervalId);
     }
-
     runtime.sources.forEach((source) => {
       source.onended = null;
       try {
         source.stop();
       } catch {
-        // Ignore.
+        // Ignore already-stopped sources.
       }
       source.disconnect();
     });
@@ -163,7 +209,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     const { context } = runtime;
     playbackRuntimeRef.current = null;
     void context.close().catch(() => {
-      // Ignore.
+      // Ignore close errors.
     });
   }, []);
 
@@ -173,24 +219,6 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     clearPlaybackRuntime();
     setPlayback(IDLE_PLAYBACK);
   }, [clearPlaybackRuntime]);
-
-  const unlockPlaybackContext = useCallback(
-    async (context: AudioContext): Promise<void> => {
-      configureAudioSession();
-
-      if (context.state !== "running") {
-        await context.resume();
-      }
-
-      const unlockSource = context.createBufferSource();
-      unlockSource.buffer = context.createBuffer(1, 1, context.sampleRate);
-      unlockSource.connect(context.destination);
-      unlockSource.start();
-      unlockSource.stop(context.currentTime + 0.001);
-      unlockSource.disconnect();
-    },
-    [configureAudioSession]
-  );
 
   const getCachedAudioPayload = useCallback((cacheKey: string, url: string): Promise<ArrayBuffer> => {
     const cached = audioPayloadCacheRef.current.get(cacheKey);
@@ -259,52 +287,33 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
   }, [collection?.allowDownloads]);
 
   useEffect(() => {
-    if (!useCountdown) {
-      return;
-    }
-
-    void getCachedAudioPayload("countdown", "/api/public/countdown").catch(() => {
-      // Best effort preload.
-    });
-  }, [getCachedAudioPayload, useCountdown]);
-
-  useEffect(() => {
     if (!orderedClips.length) {
       return;
     }
 
     let cancelled = false;
-    const prebuffer = async (): Promise<void> => {
+    const warmUp = async (): Promise<void> => {
+      await getCachedAudioPayload("countdown", "/api/public/countdown").catch(() => {
+        // Best effort cache.
+      });
       for (const clip of orderedClips) {
         if (cancelled) {
           break;
         }
-        const clipPlaybackUrl = clip.playbackUrl || clip.url;
-        try {
-          await getCachedAudioPayload(`audio:${clip.clipId}`, clipPlaybackUrl);
-        } catch {
+        await getCachedAudioPayload(`audio:${clip.clipId}`, clip.playbackUrl || clip.url).catch(() => {
           // Best effort cache.
-        }
+        });
       }
     };
 
-    void prebuffer();
+    void warmUp();
     return () => {
       cancelled = true;
     };
   }, [getCachedAudioPayload, orderedClips]);
 
   useEffect(() => {
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "hidden") {
-        stopPlayback();
-      } else {
-        configureAudioSession();
-      }
-    };
-
     const onPageShow = () => {
-      stopPlayback();
       configureAudioSession();
     };
 
@@ -312,21 +321,27 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       configureAudioSession();
     };
 
-    document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("pageshow", onPageShow);
     window.addEventListener("focus", onFocus);
 
     return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("pageshow", onPageShow);
       window.removeEventListener("focus", onFocus);
     };
-  }, [configureAudioSession, stopPlayback]);
+  }, [configureAudioSession]);
 
   useEffect(() => {
     return () => {
       stopPlayback();
       audioPayloadCacheRef.current.clear();
+      const shield = audioShieldRef.current;
+      if (shield) {
+        shield.pause();
+        shield.src = "";
+        shield.load();
+      }
+      audioShieldRef.current = null;
+      audioShieldStartedRef.current = false;
     };
   }, [stopPlayback]);
 
@@ -393,7 +408,6 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
         intervalId: null
       };
       playbackRuntimeRef.current = runtime;
-
       const context = runtime.context;
 
       const ensureActive = () => {
@@ -414,12 +428,12 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       };
 
       try {
-        await unlockPlaybackContext(context);
-        ensureActive();
-
+        await startAudioShield();
+        configureAudioSession();
         if (context.state !== "running") {
-          throw new Error("Pulsa Play de nuevo para activar el audio del navegador.");
+          await context.resume();
         }
+        ensureActive();
 
         const decodeBuffer = async (cacheKey: string, url: string): Promise<AudioBuffer> => {
           const payload = await getCachedAudioPayload(cacheKey, url);
@@ -472,6 +486,7 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
             if (signal.aborted || playbackControllerRef.current !== controller) {
               return;
             }
+
             const remaining = Math.max(0, Math.ceil(playbackStartAt - context.currentTime));
             if (remaining <= 0) {
               if (runtime.intervalId !== null) {
@@ -547,7 +562,12 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
         });
       } catch (error) {
         if (!isAbortError(error)) {
-          setErrorMessage(error instanceof Error ? error.message : "No se pudo reproducir");
+          const typed = error as { name?: string };
+          if (typed?.name === "NotAllowedError") {
+            setErrorMessage("Pulsa Play de nuevo para activar el audio en iPhone.");
+          } else {
+            setErrorMessage(error instanceof Error ? error.message : "No se pudo reproducir");
+          }
         }
       } finally {
         if (playbackControllerRef.current === controller) {
@@ -557,7 +577,15 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
         }
       }
     },
-    [clearPlaybackRuntime, delaySec, getCachedAudioPayload, stopPlayback, unlockPlaybackContext, useCountdown]
+    [
+      clearPlaybackRuntime,
+      configureAudioSession,
+      delaySec,
+      getCachedAudioPayload,
+      startAudioShield,
+      stopPlayback,
+      useCountdown
+    ]
   );
 
   return (
