@@ -10,3 +10,4 @@ pnpm-debug.log*
 data/store.json
 data/generated/*
 data/uploads/*
+data/public-previews/*
