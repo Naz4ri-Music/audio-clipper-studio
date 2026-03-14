@@ -6,6 +6,7 @@ import { getPublicPreviewUrlPath } from "@/lib/public-preview";
 
 export type AudioKind = "upload" | "generated";
 export type SourceType = "master" | "clip";
+export type CollectionHookType = "spoken" | "text";
 
 export interface AudioRecord {
   id: string;
@@ -49,6 +50,7 @@ export interface CollectionRecord {
   name: string;
   slug: string;
   allowDownloads: boolean;
+  allowHooks: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -59,6 +61,16 @@ export interface CollectionClipRecord {
   clipId: string;
   sortOrder: number;
   createdAt: string;
+}
+
+export interface CollectionHookRecord {
+  id: string;
+  collectionClipId: string;
+  type: CollectionHookType;
+  text: string;
+  isDisabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface LegacyStore {
@@ -75,13 +87,14 @@ interface LegacyStore {
 }
 
 interface AudioStore {
-  version: 4;
+  version: 5;
   records: AudioRecord[];
   folders: FolderRecord[];
   songs: SongRecord[];
   clips: ClipRecord[];
   collections: CollectionRecord[];
   collectionClips: CollectionClipRecord[];
+  collectionHooks: CollectionHookRecord[];
 }
 
 export interface LibraryAudioItem {
@@ -137,6 +150,16 @@ export interface CollectionClipItem {
   startSec: number;
   endSec: number | null;
   sortOrder: number;
+  hooks: CollectionHookItem[];
+}
+
+export interface CollectionHookItem {
+  id: string;
+  type: CollectionHookType;
+  text: string;
+  isDisabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface CollectionItem {
@@ -144,6 +167,7 @@ export interface CollectionItem {
   name: string;
   slug: string;
   allowDownloads: boolean;
+  allowHooks: boolean;
   createdAt: string;
   updatedAt: string;
   clips: CollectionClipItem[];
@@ -155,24 +179,53 @@ const GENERATED_DIR = path.join(DATA_DIR, "generated");
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 
 const EMPTY_STORE: AudioStore = {
-  version: 4,
+  version: 5,
   records: [],
   folders: [],
   songs: [],
   clips: [],
   collections: [],
-  collectionClips: []
+  collectionClips: [],
+  collectionHooks: []
 };
 
-type CollectionRecordInput = Omit<CollectionRecord, "allowDownloads"> & {
+type CollectionRecordInput = Omit<CollectionRecord, "allowDownloads" | "allowHooks"> & {
   allowDownloads?: boolean;
+  allowHooks?: boolean;
 };
 
 function normalizeCollectionRecords(records: CollectionRecordInput[]): CollectionRecord[] {
   return records.map((record) => ({
     ...record,
-    allowDownloads: record.allowDownloads === true
+    allowDownloads: record.allowDownloads === true,
+    allowHooks: record.allowHooks === true
   }));
+}
+
+type CollectionHookRecordInput = Omit<CollectionHookRecord, "isDisabled"> & {
+  isDisabled?: boolean;
+};
+
+function normalizeCollectionHookRecords(records: CollectionHookRecordInput[]): CollectionHookRecord[] {
+  return records
+    .map((record) => {
+      if (record.type !== "spoken" && record.type !== "text") {
+        return null;
+      }
+
+      const text = sanitizeName(record.text || "");
+      if (!text) {
+        return null;
+      }
+
+      return {
+        ...record,
+        type: record.type,
+        text,
+        isDisabled: record.isDisabled === true
+      };
+    })
+    .filter((record): record is CollectionHookRecord => record !== null);
 }
 
 function normalizeExtension(originalName: string, mimeType: string): string {
@@ -279,13 +332,14 @@ function migrateLegacyStore(parsed: LegacyStore): AudioStore {
   }
 
   return {
-    version: 4,
+    version: 5,
     records: legacyRecords,
     folders: [],
     songs,
     clips,
     collections: [],
-    collectionClips: []
+    collectionClips: [],
+    collectionHooks: []
   };
 }
 
@@ -296,7 +350,33 @@ function parseStore(raw: string): AudioStore {
     if (
       typeof parsed === "object" &&
       parsed !== null &&
-      (parsed as Partial<AudioStore>).version === 4 &&
+      (parsed as Partial<AudioStore>).version === 5 &&
+      Array.isArray((parsed as Partial<AudioStore>).records) &&
+      Array.isArray((parsed as Partial<AudioStore>).folders) &&
+      Array.isArray((parsed as Partial<AudioStore>).songs) &&
+      Array.isArray((parsed as Partial<AudioStore>).clips) &&
+      Array.isArray((parsed as Partial<AudioStore>).collections) &&
+      Array.isArray((parsed as Partial<AudioStore>).collectionClips) &&
+      Array.isArray((parsed as Partial<AudioStore>).collectionHooks)
+    ) {
+      const normalizedCollections = normalizeCollectionRecords(
+        (parsed as Partial<AudioStore>).collections as CollectionRecordInput[]
+      );
+      const normalizedHooks = normalizeCollectionHookRecords(
+        (parsed as Partial<AudioStore>).collectionHooks as CollectionHookRecordInput[]
+      );
+
+      return {
+        ...(parsed as AudioStore),
+        collections: normalizedCollections,
+        collectionHooks: normalizedHooks
+      };
+    }
+
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { version?: number }).version === 4 &&
       Array.isArray((parsed as Partial<AudioStore>).records) &&
       Array.isArray((parsed as Partial<AudioStore>).folders) &&
       Array.isArray((parsed as Partial<AudioStore>).songs) &&
@@ -304,13 +384,24 @@ function parseStore(raw: string): AudioStore {
       Array.isArray((parsed as Partial<AudioStore>).collections) &&
       Array.isArray((parsed as Partial<AudioStore>).collectionClips)
     ) {
-      const normalizedCollections = normalizeCollectionRecords(
-        (parsed as Partial<AudioStore>).collections as CollectionRecordInput[]
-      );
+      const migratedV4 = parsed as unknown as {
+        records: AudioRecord[];
+        folders: FolderRecord[];
+        songs: SongRecord[];
+        clips: ClipRecord[];
+        collections: CollectionRecordInput[];
+        collectionClips: CollectionClipRecord[];
+      };
 
       return {
-        ...(parsed as AudioStore),
-        collections: normalizedCollections
+        version: 5,
+        records: migratedV4.records,
+        folders: migratedV4.folders,
+        songs: migratedV4.songs,
+        clips: migratedV4.clips,
+        collections: normalizeCollectionRecords(migratedV4.collections),
+        collectionClips: migratedV4.collectionClips,
+        collectionHooks: []
       };
     }
 
@@ -335,13 +426,14 @@ function parseStore(raw: string): AudioStore {
       };
 
       return {
-        version: 4,
+        version: 5,
         records: migratedV3.records,
         folders: migratedV3.folders,
         songs: migratedV3.songs,
         clips: migratedV3.clips,
         collections: normalizeCollectionRecords(migratedV3.collections),
-        collectionClips: migratedV3.collectionClips
+        collectionClips: migratedV3.collectionClips,
+        collectionHooks: []
       };
     }
 
@@ -362,13 +454,14 @@ function parseStore(raw: string): AudioStore {
       };
 
       return {
-        version: 4,
+        version: 5,
         records: migrated.records,
         folders: migrated.folders,
         songs: migrated.songs,
         clips: migrated.clips,
         collections: [],
-        collectionClips: []
+        collectionClips: [],
+        collectionHooks: []
       };
     }
 
@@ -384,10 +477,26 @@ async function readStore(): Promise<AudioStore> {
   const store = parseStore(raw);
   let requiresMigrationWrite = false;
   try {
-    const parsed = JSON.parse(raw) as { version?: number; collections?: CollectionRecordInput[] };
+    const parsed = JSON.parse(raw) as {
+      version?: number;
+      collections?: CollectionRecordInput[];
+      collectionHooks?: CollectionHookRecordInput[];
+    };
     const hasInvalidCollections =
-      Array.isArray(parsed.collections) && parsed.collections.some((collection) => typeof collection.allowDownloads !== "boolean");
-    requiresMigrationWrite = parsed.version !== 4 || hasInvalidCollections;
+      Array.isArray(parsed.collections) &&
+      parsed.collections.some(
+        (collection) =>
+          typeof collection.allowDownloads !== "boolean" || typeof collection.allowHooks !== "boolean"
+      );
+    const hasInvalidHooks =
+      !Array.isArray(parsed.collectionHooks) ||
+      parsed.collectionHooks.some(
+        (hook) =>
+          (hook.type !== "spoken" && hook.type !== "text") ||
+          typeof hook.text !== "string" ||
+          typeof hook.isDisabled !== "boolean"
+      );
+    requiresMigrationWrite = parsed.version !== 5 || hasInvalidCollections || hasInvalidHooks;
   } catch {
     requiresMigrationWrite = true;
   }
@@ -526,6 +635,7 @@ function uniqueCollectionSlug(base: string, existing: Set<string>): string {
 function mapCollectionForOutput(params: {
   collection: CollectionRecord;
   collectionClips: CollectionClipRecord[];
+  collectionHooks: CollectionHookRecord[];
   clipsById: Map<string, ClipRecord>;
   songsById: Map<string, SongRecord>;
   recordsById: Map<string, AudioRecord>;
@@ -544,6 +654,26 @@ function mapCollectionForOutput(params: {
         return null;
       }
 
+      const hooks = params.collectionHooks
+        .filter((hook) => hook.collectionClipId === item.id)
+        .sort((a, b) => {
+          if (a.type === b.type) {
+            return a.createdAt < b.createdAt ? -1 : 1;
+          }
+          return a.type === "spoken" ? -1 : 1;
+        })
+        .map(
+          (hook) =>
+            ({
+              id: hook.id,
+              type: hook.type,
+              text: hook.text,
+              isDisabled: hook.isDisabled,
+              createdAt: hook.createdAt,
+              updatedAt: hook.updatedAt
+            }) satisfies CollectionHookItem
+        );
+
       return {
         id: item.id,
         clipId: clip.id,
@@ -556,7 +686,8 @@ function mapCollectionForOutput(params: {
         downloadUrl: withBasePath(`/api/public/collections/${params.collection.slug}/clips/${clip.id}/download`),
         startSec: clip.startSec,
         endSec: clip.endSec,
-        sortOrder: item.sortOrder
+        sortOrder: item.sortOrder,
+        hooks
       } satisfies CollectionClipItem;
     })
     .filter((clip): clip is CollectionClipItem => clip !== null);
@@ -566,6 +697,7 @@ function mapCollectionForOutput(params: {
     name: params.collection.name,
     slug: params.collection.slug,
     allowDownloads: params.collection.allowDownloads,
+    allowHooks: params.collection.allowHooks,
     createdAt: params.collection.createdAt,
     updatedAt: params.collection.updatedAt,
     clips
@@ -584,6 +716,7 @@ export async function getCollectionsData(): Promise<CollectionItem[]> {
       mapCollectionForOutput({
         collection,
         collectionClips: store.collectionClips,
+        collectionHooks: store.collectionHooks,
         clipsById,
         songsById,
         recordsById
@@ -605,6 +738,7 @@ export async function getPublicCollectionBySlug(slug: string): Promise<Collectio
   return mapCollectionForOutput({
     collection,
     collectionClips: store.collectionClips,
+    collectionHooks: store.collectionHooks,
     clipsById,
     songsById,
     recordsById
@@ -662,6 +796,7 @@ export async function createCollection(params: {
   name: string;
   slug?: string | null;
   allowDownloads?: boolean;
+  allowHooks?: boolean;
 }): Promise<CollectionRecord> {
   const store = await readStore();
   const name = sanitizeRequiredName(params.name, "Colección");
@@ -676,6 +811,7 @@ export async function createCollection(params: {
     name,
     slug,
     allowDownloads: params.allowDownloads === true,
+    allowHooks: params.allowHooks === true,
     createdAt: now,
     updatedAt: now
   };
@@ -690,6 +826,7 @@ export async function updateCollection(params: {
   name?: string | null;
   slug?: string | null;
   allowDownloads?: boolean;
+  allowHooks?: boolean;
 }): Promise<CollectionRecord> {
   const store = await readStore();
   const collection = store.collections.find((item) => item.id === params.collectionId);
@@ -711,6 +848,10 @@ export async function updateCollection(params: {
     collection.allowDownloads = params.allowDownloads;
   }
 
+  if (typeof params.allowHooks === "boolean") {
+    collection.allowHooks = params.allowHooks;
+  }
+
   collection.updatedAt = new Date().toISOString();
   await writeStore(store);
   return collection;
@@ -724,7 +865,11 @@ export async function deleteCollectionById(collectionId: string): Promise<boolea
   }
 
   store.collections.splice(index, 1);
+  const removedCollectionClipIds = new Set(
+    store.collectionClips.filter((item) => item.collectionId === collectionId).map((item) => item.id)
+  );
   store.collectionClips = store.collectionClips.filter((item) => item.collectionId !== collectionId);
+  store.collectionHooks = store.collectionHooks.filter((hook) => !removedCollectionClipIds.has(hook.collectionClipId));
   await writeStore(store);
   return true;
 }
@@ -773,6 +918,11 @@ export async function removeClipFromCollection(params: {
   clipId: string;
 }): Promise<boolean> {
   const store = await readStore();
+  const removedCollectionClipIds = new Set(
+    store.collectionClips
+      .filter((item) => item.collectionId === params.collectionId && item.clipId === params.clipId)
+      .map((item) => item.id)
+  );
   const before = store.collectionClips.length;
   store.collectionClips = store.collectionClips.filter(
     (item) => !(item.collectionId === params.collectionId && item.clipId === params.clipId)
@@ -781,11 +931,174 @@ export async function removeClipFromCollection(params: {
     return false;
   }
 
+  store.collectionHooks = store.collectionHooks.filter((hook) => !removedCollectionClipIds.has(hook.collectionClipId));
+
   const collection = store.collections.find((item) => item.id === params.collectionId);
   if (collection) {
     collection.updatedAt = new Date().toISOString();
   }
 
+  await writeStore(store);
+  return true;
+}
+
+function resolveCollectionClipForHook(params: {
+  store: AudioStore;
+  collectionId: string;
+  clipId: string;
+}): { collection: CollectionRecord; collectionClip: CollectionClipRecord } {
+  const collection = params.store.collections.find((item) => item.id === params.collectionId);
+  if (!collection) {
+    throw new Error("Colección no encontrada");
+  }
+
+  const collectionClip = params.store.collectionClips.find(
+    (item) => item.collectionId === params.collectionId && item.clipId === params.clipId
+  );
+  if (!collectionClip) {
+    throw new Error("Clip no encontrado en la colección");
+  }
+
+  return { collection, collectionClip };
+}
+
+export async function addHookToCollectionClip(params: {
+  collectionId: string;
+  clipId: string;
+  type: CollectionHookType;
+  text: string;
+  isDisabled?: boolean;
+}): Promise<CollectionHookRecord> {
+  const store = await readStore();
+  const { collection, collectionClip } = resolveCollectionClipForHook({
+    store,
+    collectionId: params.collectionId,
+    clipId: params.clipId
+  });
+
+  if (params.type !== "spoken" && params.type !== "text") {
+    throw new Error("Tipo de hook no válido");
+  }
+
+  const text = sanitizeName(params.text);
+  if (!text) {
+    throw new Error("El texto del hook es obligatorio");
+  }
+
+  const now = new Date().toISOString();
+  const hook: CollectionHookRecord = {
+    id: randomUUID(),
+    collectionClipId: collectionClip.id,
+    type: params.type,
+    text,
+    isDisabled: params.isDisabled === true,
+    createdAt: now,
+    updatedAt: now
+  };
+
+  store.collectionHooks.push(hook);
+  collection.updatedAt = now;
+  await writeStore(store);
+  return hook;
+}
+
+export async function updateCollectionClipHook(params: {
+  collectionId: string;
+  clipId: string;
+  hookId: string;
+  text?: string | null;
+  isDisabled?: boolean;
+}): Promise<CollectionHookRecord> {
+  const store = await readStore();
+  const { collection, collectionClip } = resolveCollectionClipForHook({
+    store,
+    collectionId: params.collectionId,
+    clipId: params.clipId
+  });
+
+  const hook = store.collectionHooks.find(
+    (item) => item.id === params.hookId && item.collectionClipId === collectionClip.id
+  );
+  if (!hook) {
+    throw new Error("Hook no encontrado");
+  }
+
+  if (typeof params.text === "string") {
+    hook.text = sanitizeRequiredName(params.text, hook.text);
+  }
+
+  if (typeof params.isDisabled === "boolean") {
+    hook.isDisabled = params.isDisabled;
+  }
+
+  const now = new Date().toISOString();
+  hook.updatedAt = now;
+  collection.updatedAt = now;
+  await writeStore(store);
+  return hook;
+}
+
+export async function updatePublicCollectionHookBySlug(params: {
+  slug: string;
+  clipId: string;
+  hookId: string;
+  isDisabled?: boolean;
+}): Promise<CollectionHookRecord> {
+  const store = await readStore();
+  const collection = store.collections.find((item) => item.slug === params.slug);
+  if (!collection) {
+    throw new Error("Colección no encontrada");
+  }
+  if (!collection.allowHooks) {
+    throw new Error("Los hooks no están habilitados para esta colección");
+  }
+
+  const collectionClip = store.collectionClips.find(
+    (item) => item.collectionId === collection.id && item.clipId === params.clipId
+  );
+  if (!collectionClip) {
+    throw new Error("Clip no encontrado en la colección");
+  }
+
+  const hook = store.collectionHooks.find(
+    (item) => item.id === params.hookId && item.collectionClipId === collectionClip.id
+  );
+  if (!hook) {
+    throw new Error("Hook no encontrado");
+  }
+
+  if (typeof params.isDisabled === "boolean") {
+    hook.isDisabled = params.isDisabled;
+  }
+
+  const now = new Date().toISOString();
+  hook.updatedAt = now;
+  collection.updatedAt = now;
+  await writeStore(store);
+  return hook;
+}
+
+export async function removeCollectionClipHook(params: {
+  collectionId: string;
+  clipId: string;
+  hookId: string;
+}): Promise<boolean> {
+  const store = await readStore();
+  const { collection, collectionClip } = resolveCollectionClipForHook({
+    store,
+    collectionId: params.collectionId,
+    clipId: params.clipId
+  });
+
+  const before = store.collectionHooks.length;
+  store.collectionHooks = store.collectionHooks.filter(
+    (item) => !(item.id === params.hookId && item.collectionClipId === collectionClip.id)
+  );
+  if (store.collectionHooks.length === before) {
+    return false;
+  }
+
+  collection.updatedAt = new Date().toISOString();
   await writeStore(store);
   return true;
 }
@@ -1165,7 +1478,11 @@ export async function deleteClipById(clipId: string): Promise<boolean> {
   }
 
   const [removed] = store.clips.splice(index, 1);
+  const removedCollectionClipIds = new Set(
+    store.collectionClips.filter((item) => item.clipId === removed.id).map((item) => item.id)
+  );
   store.collectionClips = store.collectionClips.filter((item) => item.clipId !== removed.id);
+  store.collectionHooks = store.collectionHooks.filter((hook) => !removedCollectionClipIds.has(hook.collectionClipId));
   const song = store.songs.find((item) => item.id === removed.songId);
   if (song) {
     song.updatedAt = new Date().toISOString();

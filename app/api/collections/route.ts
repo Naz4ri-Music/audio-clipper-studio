@@ -9,6 +9,7 @@ interface CreateBody {
   name?: string;
   slug?: string | null;
   allowDownloads?: boolean;
+  allowHooks?: boolean;
 }
 
 export async function GET(): Promise<NextResponse> {
@@ -34,12 +35,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const slug = typeof body.slug === "string" ? body.slug : null;
     const allowDownloads = body.allowDownloads === true;
+    const allowHooks = body.allowHooks === true;
 
     if (!name) {
       return NextResponse.json({ error: "El nombre de la colección es obligatorio" }, { status: 400 });
     }
 
-    const collection = await createCollection({ name, slug, allowDownloads });
+    const collection = await createCollection({ name, slug, allowDownloads, allowHooks });
     return NextResponse.json({ collection });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Error desconocido";

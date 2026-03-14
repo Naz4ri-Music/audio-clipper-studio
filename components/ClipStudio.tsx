@@ -2,9 +2,11 @@
 
 import { type DragEvent as ReactDragEvent, type MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 type SourceType = "master" | "clip";
 type PlaybackPhase = "idle" | "loading" | "delay" | "countdown" | "clip";
+type CollectionHookType = "spoken" | "text";
 
 interface LibraryAudio {
   id: string;
@@ -57,6 +59,16 @@ interface CollectionClipLink {
   startSec: number;
   endSec: number | null;
   sortOrder: number;
+  hooks: CollectionHook[];
+}
+
+interface CollectionHook {
+  id: string;
+  type: CollectionHookType;
+  text: string;
+  isDisabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface CollectionItem {
@@ -64,6 +76,7 @@ interface CollectionItem {
   name: string;
   slug: string;
   allowDownloads: boolean;
+  allowHooks: boolean;
   createdAt: string;
   updatedAt: string;
   clips: CollectionClipLink[];
@@ -189,43 +202,16 @@ async function awaitWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Prom
   });
 }
 
-async function copyTextToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch {
-      // Fall back to execCommand for iOS/insecure contexts.
-    }
-  }
-
-  const textArea = document.createElement("textarea");
-  textArea.value = text;
-  textArea.setAttribute("readonly", "");
-  textArea.style.position = "fixed";
-  textArea.style.top = "0";
-  textArea.style.left = "0";
-  textArea.style.width = "1px";
-  textArea.style.height = "1px";
-  textArea.style.opacity = "0";
-  textArea.style.pointerEvents = "none";
-  document.body.appendChild(textArea);
-
-  try {
-    textArea.focus();
-    textArea.select();
-    textArea.setSelectionRange(0, text.length);
-    const copied = document.execCommand("copy");
-    if (!copied) {
-      throw new Error("No se pudo copiar al portapapeles");
-    }
-  } finally {
-    textArea.remove();
-  }
-}
-
 function baseName(filename: string): string {
   return filename.replace(/\.[^.]+$/, "");
+}
+
+function collectionHookLabel(type: CollectionHookType): string {
+  return type === "spoken" ? "Hooks hablados" : "Hooks de texto";
+}
+
+function buildHookDraftKey(collectionClipId: string, type: CollectionHookType): string {
+  return `${collectionClipId}:${type}`;
 }
 
 function flattenSongs(library: LibraryPayload | null): LibrarySong[] {
@@ -341,6 +327,7 @@ export function ClipStudio(): JSX.Element {
   const [newCollectionSlug, setNewCollectionSlug] = useState("");
   const [isCreatingCollection, setIsCreatingCollection] = useState(false);
   const [selectedCollectionIdForAdd, setSelectedCollectionIdForAdd] = useState<string>("");
+  const [hookDrafts, setHookDrafts] = useState<Record<string, string>>({});
 
   const [useCountdown, setUseCountdown] = useState(true);
   const [delaySec, setDelaySec] = useState(0);
@@ -1365,6 +1352,26 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
+  const setCollectionHooksAction = async (collection: CollectionItem, allowHooks: boolean) => {
+    try {
+      resetMessages();
+      const response = await fetch(withBasePath(`/api/collections/${collection.id}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ allowHooks })
+      });
+      const data = (await response.json()) as { collection?: { id: string }; error?: string };
+      if (!response.ok || !data.collection) {
+        throw new Error(data.error || "No se pudo actualizar la opción de hooks");
+      }
+      await refreshCollections();
+      setInfoMessage(allowHooks ? "Hooks habilitados para la colección." : "Hooks deshabilitados.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo actualizar la colección";
+      setErrorMessage(message);
+    }
+  };
+
   const addClipToCollectionAction = async (collectionId: string, clipId: string) => {
     try {
       resetMessages();
@@ -1399,6 +1406,125 @@ export function ClipStudio(): JSX.Element {
       setInfoMessage("Clip eliminado de la colección.");
     } catch (error) {
       const message = error instanceof Error ? error.message : "No se pudo quitar el clip";
+      setErrorMessage(message);
+    }
+  };
+
+  const addHookToCollectionClipAction = async (
+    collectionId: string,
+    clipId: string,
+    collectionClipId: string,
+    type: CollectionHookType
+  ) => {
+    const draftKey = buildHookDraftKey(collectionClipId, type);
+    const text = hookDrafts[draftKey]?.trim() ?? "";
+    if (!text) {
+      setErrorMessage(`Escribe un texto para ${collectionHookLabel(type).toLowerCase()}.`);
+      setInfoMessage(null);
+      return;
+    }
+
+    try {
+      resetMessages();
+      const response = await fetch(withBasePath(`/api/collections/${collectionId}/clips/${clipId}/hooks`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, text })
+      });
+      const data = (await response.json()) as { hook?: { id: string }; error?: string };
+      if (!response.ok || !data.hook) {
+        throw new Error(data.error || "No se pudo crear el hook");
+      }
+
+      setHookDrafts((current) => ({
+        ...current,
+        [draftKey]: ""
+      }));
+      await refreshCollections();
+      setInfoMessage(`${collectionHookLabel(type)} añadidos al clip.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo crear el hook";
+      setErrorMessage(message);
+    }
+  };
+
+  const updateCollectionHookAction = async (params: {
+    collectionId: string;
+    clipId: string;
+    hookId: string;
+    text?: string;
+    isDisabled?: boolean;
+    successMessage: string;
+  }) => {
+    try {
+      resetMessages();
+      const response = await fetch(
+        withBasePath(`/api/collections/${params.collectionId}/clips/${params.clipId}/hooks/${params.hookId}`),
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: params.text,
+            isDisabled: params.isDisabled
+          })
+        }
+      );
+      const data = (await response.json()) as { hook?: { id: string }; error?: string };
+      if (!response.ok || !data.hook) {
+        throw new Error(data.error || "No se pudo actualizar el hook");
+      }
+      await refreshCollections();
+      setInfoMessage(params.successMessage);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo actualizar el hook";
+      setErrorMessage(message);
+    }
+  };
+
+  const editCollectionHookAction = async (collectionId: string, clipId: string, hook: CollectionHook) => {
+    const nextText = window.prompt("Editar hook:", hook.text)?.trim();
+    if (!nextText || nextText === hook.text) {
+      return;
+    }
+
+    await updateCollectionHookAction({
+      collectionId,
+      clipId,
+      hookId: hook.id,
+      text: nextText,
+      successMessage: "Hook actualizado."
+    });
+  };
+
+  const toggleCollectionHookDisabledAction = async (
+    collectionId: string,
+    clipId: string,
+    hook: CollectionHook,
+    isDisabled: boolean
+  ) => {
+    await updateCollectionHookAction({
+      collectionId,
+      clipId,
+      hookId: hook.id,
+      isDisabled,
+      successMessage: isDisabled ? "Hook marcado como desactivado." : "Hook reactivado."
+    });
+  };
+
+  const deleteCollectionHookAction = async (collectionId: string, clipId: string, hookId: string) => {
+    try {
+      resetMessages();
+      const response = await fetch(withBasePath(`/api/collections/${collectionId}/clips/${clipId}/hooks/${hookId}`), {
+        method: "DELETE"
+      });
+      const data = (await response.json()) as { ok?: boolean; error?: string };
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || "No se pudo eliminar el hook");
+      }
+      await refreshCollections();
+      setInfoMessage("Hook eliminado.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo eliminar el hook";
       setErrorMessage(message);
     }
   };
@@ -2323,6 +2449,15 @@ export function ClipStudio(): JSX.Element {
                     Permitir descargas en colección pública
                   </label>
 
+                  <label className="checkbox-line">
+                    <input
+                      type="checkbox"
+                      checked={collection.allowHooks}
+                      onChange={(event) => void setCollectionHooksAction(collection, event.target.checked)}
+                    />
+                    Permitir hooks en colección pública
+                  </label>
+
                   <div className="collection-actions">
                     <button type="button" className="btn btn-ghost" onClick={() => void renameCollectionAction(collection)}>
                       Renombrar
@@ -2339,18 +2474,112 @@ export function ClipStudio(): JSX.Element {
 
                   {collection.clips.length > 0 && (
                     <ul className="collection-clip-items">
-                      {collection.clips.map((item) => (
-                        <li key={item.id}>
-                          <span>{item.songName} · {item.clipName}</span>
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            onClick={() => void removeClipFromCollectionAction(collection.id, item.clipId)}
-                          >
-                            Quitar
-                          </button>
-                        </li>
-                      ))}
+                      {collection.clips.map((item) => {
+                        const spokenHooks = item.hooks.filter((hook) => hook.type === "spoken");
+                        const textHooks = item.hooks.filter((hook) => hook.type === "text");
+
+                        return (
+                          <li key={item.id} className="collection-clip-item">
+                            <div className="collection-clip-row">
+                              <span>{item.songName} · {item.clipName}</span>
+                              <button
+                                type="button"
+                                className="btn btn-ghost"
+                                onClick={() => void removeClipFromCollectionAction(collection.id, item.clipId)}
+                              >
+                                Quitar
+                              </button>
+                            </div>
+
+                            <p className="small-note">
+                              Hooks hablados: {spokenHooks.length} · Hooks de texto: {textHooks.length}
+                            </p>
+
+                            {(["spoken", "text"] as const).map((hookType) => {
+                              const hooks = hookType === "spoken" ? spokenHooks : textHooks;
+                              const draftKey = buildHookDraftKey(item.id, hookType);
+
+                              return (
+                                <div key={hookType} className="collection-hook-group">
+                                  <strong>{collectionHookLabel(hookType)}</strong>
+                                  <div className="collection-hook-input">
+                                    <input
+                                      type="text"
+                                      className="text-input"
+                                      placeholder={`Añadir ${hookType === "spoken" ? "hook hablado" : "hook de texto"}`}
+                                      value={hookDrafts[draftKey] ?? ""}
+                                      onChange={(event) =>
+                                        setHookDrafts((current) => ({
+                                          ...current,
+                                          [draftKey]: event.target.value
+                                        }))
+                                      }
+                                    />
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      onClick={() =>
+                                        void addHookToCollectionClipAction(collection.id, item.clipId, item.id, hookType)
+                                      }
+                                    >
+                                      Añadir
+                                    </button>
+                                  </div>
+
+                                  {hooks.length === 0 ? (
+                                    <p className="small-note">Sin hooks todavía.</p>
+                                  ) : (
+                                    <ul className="collection-hook-items">
+                                      {hooks.map((hook) => (
+                                        <li
+                                          key={hook.id}
+                                          className={`collection-hook-item ${hook.isDisabled ? "is-disabled" : ""}`}
+                                        >
+                                          <span>{hook.text}</span>
+                                          <div className="collection-hook-actions">
+                                            <button
+                                              type="button"
+                                              className="btn btn-ghost"
+                                              onClick={() =>
+                                                void editCollectionHookAction(collection.id, item.clipId, hook)
+                                              }
+                                            >
+                                              Editar
+                                            </button>
+                                            <button
+                                              type="button"
+                                              className="btn btn-ghost"
+                                              onClick={() =>
+                                                void toggleCollectionHookDisabledAction(
+                                                  collection.id,
+                                                  item.clipId,
+                                                  hook,
+                                                  !hook.isDisabled
+                                                )
+                                              }
+                                            >
+                                              {hook.isDisabled ? "Activar" : "Desactivar"}
+                                            </button>
+                                            <button
+                                              type="button"
+                                              className="btn btn-warning"
+                                              onClick={() =>
+                                                void deleteCollectionHookAction(collection.id, item.clipId, hook.id)
+                                              }
+                                            >
+                                              Eliminar
+                                            </button>
+                                          </div>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
 

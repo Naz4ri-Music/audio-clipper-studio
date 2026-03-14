@@ -7,6 +7,7 @@ interface UpdateBody {
   name?: string;
   slug?: string;
   allowDownloads?: boolean;
+  allowHooks?: boolean;
 }
 
 export async function PATCH(
@@ -19,7 +20,8 @@ export async function PATCH(
       collectionId: context.params.id,
       name: typeof body.name === "string" ? body.name : undefined,
       slug: typeof body.slug === "string" ? body.slug : undefined,
-      allowDownloads: typeof body.allowDownloads === "boolean" ? body.allowDownloads : undefined
+      allowDownloads: typeof body.allowDownloads === "boolean" ? body.allowDownloads : undefined,
+      allowHooks: typeof body.allowHooks === "boolean" ? body.allowHooks : undefined
     });
 
     return NextResponse.json({ collection });

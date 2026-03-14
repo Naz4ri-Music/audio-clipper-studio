@@ -2,8 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { withBasePath } from "@/lib/base-path";
+import { copyTextToClipboard } from "@/lib/clipboard";
 
 type PlaybackPhase = "idle" | "loading" | "delay" | "countdown" | "clip";
+type CollectionHookType = "spoken" | "text";
 
 interface PublicCollectionClip {
   id: string;
@@ -18,6 +20,16 @@ interface PublicCollectionClip {
   startSec: number;
   endSec: number | null;
   sortOrder: number;
+  hooks: PublicCollectionHook[];
+}
+
+interface PublicCollectionHook {
+  id: string;
+  type: CollectionHookType;
+  text: string;
+  isDisabled: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface PublicCollection {
@@ -25,6 +37,7 @@ interface PublicCollection {
   name: string;
   slug: string;
   allowDownloads: boolean;
+  allowHooks: boolean;
   clips: PublicCollectionClip[];
 }
 
@@ -90,6 +103,10 @@ function extractFilename(contentDisposition: string | null): string | null {
   return plainMatch?.[1] ?? null;
 }
 
+function collectionHookLabel(type: CollectionHookType): string {
+  return type === "spoken" ? "Hooks hablados" : "Hooks de texto";
+}
+
 async function fetchWithTimeout(url: string, timeoutMs = 45000): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => {
@@ -115,7 +132,10 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
   const [useCountdown, setUseCountdown] = useState(true);
   const [delaySec, setDelaySec] = useState(0);
   const [showDownloads, setShowDownloads] = useState(false);
+  const [showHooks, setShowHooks] = useState(false);
   const [downloadingClipId, setDownloadingClipId] = useState<string | null>(null);
+  const [updatingHookId, setUpdatingHookId] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const [playback, setPlayback] = useState<PlaybackState>(IDLE_PLAYBACK);
 
@@ -124,11 +144,23 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
   const audioPayloadCacheRef = useRef<Map<string, Promise<ArrayBuffer>>>(new Map());
   const audioShieldRef = useRef<HTMLAudioElement | null>(null);
   const audioShieldStartedRef = useRef(false);
+  const toastTimeoutRef = useRef<number | null>(null);
 
   const orderedClips = useMemo(
     () => [...(collection?.clips ?? [])].sort((a, b) => a.sortOrder - b.sortOrder),
     [collection?.clips]
   );
+
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    if (toastTimeoutRef.current !== null) {
+      window.clearTimeout(toastTimeoutRef.current);
+    }
+    toastTimeoutRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+      toastTimeoutRef.current = null;
+    }, 2200);
+  }, []);
 
   const configureAudioSession = useCallback(() => {
     const navWithSession = navigator as Navigator & { audioSession?: AudioSessionLike };
@@ -287,6 +319,12 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
   }, [collection?.allowDownloads]);
 
   useEffect(() => {
+    if (!collection?.allowHooks) {
+      setShowHooks(false);
+    }
+  }, [collection?.allowHooks]);
+
+  useEffect(() => {
     if (!orderedClips.length) {
       return;
     }
@@ -334,6 +372,9 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
     return () => {
       stopPlayback();
       audioPayloadCacheRef.current.clear();
+      if (toastTimeoutRef.current !== null) {
+        window.clearTimeout(toastTimeoutRef.current);
+      }
       const shield = audioShieldRef.current;
       if (shield) {
         shield.pause();
@@ -385,6 +426,67 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
       }
     },
     [collection?.allowDownloads]
+  );
+
+  const copyHook = useCallback(
+    async (hookText: string) => {
+      try {
+        await copyTextToClipboard(hookText);
+        showToast("Hook copiado");
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "No se pudo copiar el hook");
+        showToast("No se pudo copiar");
+      }
+    },
+    [showToast]
+  );
+
+  const toggleHookDisabled = useCallback(
+    async (clip: PublicCollectionClip, hook: PublicCollectionHook, isDisabled: boolean) => {
+      if (!collection?.allowHooks) {
+        return;
+      }
+
+      setUpdatingHookId(hook.id);
+      setErrorMessage(null);
+
+      try {
+        const response = await fetch(withBasePath(`/api/public/collections/${props.params.slug}/clips/${clip.clipId}/hooks/${hook.id}`), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ isDisabled })
+        });
+        const data = (await response.json()) as { hook?: { id: string; isDisabled: boolean }; error?: string };
+        if (!response.ok || !data.hook) {
+          throw new Error(data.error || "No se pudo actualizar el hook");
+        }
+
+        setCollection((current) => {
+          if (!current) {
+            return current;
+          }
+
+          return {
+            ...current,
+            clips: current.clips.map((currentClip) =>
+              currentClip.clipId !== clip.clipId
+                ? currentClip
+                : {
+                    ...currentClip,
+                    hooks: currentClip.hooks.map((currentHook) =>
+                      currentHook.id === hook.id ? { ...currentHook, isDisabled: data.hook!.isDisabled } : currentHook
+                    )
+                  }
+            )
+          };
+        });
+      } catch (error) {
+        setErrorMessage(error instanceof Error ? error.message : "No se pudo actualizar el hook");
+      } finally {
+        setUpdatingHookId(null);
+      }
+    },
+    [collection?.allowHooks, props.params.slug]
   );
 
   const playClip = useCallback(
@@ -643,6 +745,13 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
             Downloads
           </label>
         )}
+
+        {collection?.allowHooks && (
+          <label className="checkbox-line">
+            <input type="checkbox" checked={showHooks} onChange={(event) => setShowHooks(event.target.checked)} />
+            Hooks
+          </label>
+        )}
       </section>
 
       <section className="panel">
@@ -699,6 +808,52 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
                       </button>
                     )}
                   </div>
+
+                  {collection?.allowHooks && showHooks && (
+                    <div className="clip-hooks">
+                      {(["spoken", "text"] as const).map((hookType) => {
+                        const hooks = clip.hooks.filter((hook) => hook.type === hookType);
+
+                        return (
+                          <details key={hookType} className="hook-dropdown">
+                            <summary>
+                              {collectionHookLabel(hookType)} <span className="small-note">({hooks.length})</span>
+                            </summary>
+
+                            {hooks.length === 0 ? (
+                              <p className="small-note">No hay hooks en este bloque.</p>
+                            ) : (
+                              <ul className="hook-list">
+                                {hooks.map((hook) => (
+                                  <li key={hook.id} className={`hook-item ${hook.isDisabled ? "is-disabled" : ""}`}>
+                                    <button
+                                      type="button"
+                                      className="hook-copy-button"
+                                      onClick={() => void copyHook(hook.text)}
+                                    >
+                                      {hook.text}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="btn btn-ghost"
+                                      disabled={updatingHookId === hook.id}
+                                      onClick={() => void toggleHookDisabled(clip, hook, !hook.isDisabled)}
+                                    >
+                                      {updatingHookId === hook.id
+                                        ? "Guardando..."
+                                        : hook.isDisabled
+                                          ? "Activar"
+                                          : "Desactivar"}
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </details>
+                        );
+                      })}
+                    </div>
+                  )}
                 </article>
               );
             })}
@@ -707,6 +862,12 @@ export default function CollectionPage(props: { params: { slug: string } }): JSX
 
         {errorMessage && <p className="error-text">{errorMessage}</p>}
       </section>
+
+      {toastMessage && (
+        <div className="floating-toast" role="status" aria-live="polite">
+          {toastMessage}
+        </div>
+      )}
     </main>
   );
 }
