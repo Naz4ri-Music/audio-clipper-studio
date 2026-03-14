@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { updatePublicCollectionHookBySlug } from "@/lib/storage";
+import { updatePublicClipHookBySlug } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,7 +19,7 @@ export async function PATCH(
       return NextResponse.json({ error: "El estado del hook es obligatorio" }, { status: 400 });
     }
 
-    const hook = await updatePublicCollectionHookBySlug({
+    const hook = await updatePublicClipHookBySlug({
       slug: context.params.slug,
       clipId: context.params.clipId,
       hookId: context.params.hookId,

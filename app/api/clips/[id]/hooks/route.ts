@@ -11,7 +11,7 @@ interface Body {
 
 export async function POST(
   request: NextRequest,
-  context: { params: { clipId: string } }
+  context: { params: { id: string } }
 ): Promise<NextResponse> {
   try {
     const body = (await request.json()) as Body;
@@ -25,7 +25,7 @@ export async function POST(
     }
 
     const hook = await addHookToClip({
-      clipId: context.params.clipId,
+      clipId: context.params.id,
       type: body.type,
       text,
       isDisabled: body.isDisabled === true

@@ -10,12 +10,12 @@ interface Body {
 
 export async function PATCH(
   request: NextRequest,
-  context: { params: { clipId: string; hookId: string } }
+  context: { params: { id: string; hookId: string } }
 ): Promise<NextResponse> {
   try {
     const body = (await request.json()) as Body;
     const hook = await updateClipHook({
-      clipId: context.params.clipId,
+      clipId: context.params.id,
       hookId: context.params.hookId,
       text: typeof body.text === "string" ? body.text : undefined,
       isDisabled: typeof body.isDisabled === "boolean" ? body.isDisabled : undefined
@@ -30,11 +30,11 @@ export async function PATCH(
 
 export async function DELETE(
   _request: NextRequest,
-  context: { params: { clipId: string; hookId: string } }
+  context: { params: { id: string; hookId: string } }
 ): Promise<NextResponse> {
   try {
     const removed = await removeClipHook({
-      clipId: context.params.clipId,
+      clipId: context.params.id,
       hookId: context.params.hookId
     });
 

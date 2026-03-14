@@ -25,6 +25,7 @@ interface LibraryClip {
   startSec: number;
   endSec: number | null;
   createdAt: string;
+  hooks: CollectionHook[];
 }
 
 interface LibrarySong {
@@ -210,8 +211,8 @@ function collectionHookLabel(type: CollectionHookType): string {
   return type === "spoken" ? "Hooks hablados" : "Hooks de texto";
 }
 
-function buildHookDraftKey(collectionClipId: string, type: CollectionHookType): string {
-  return `${collectionClipId}:${type}`;
+function buildHookDraftKey(clipId: string, type: CollectionHookType): string {
+  return `${clipId}:${type}`;
 }
 
 function flattenSongs(library: LibraryPayload | null): LibrarySong[] {
@@ -1410,13 +1411,8 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
-  const addHookToCollectionClipAction = async (
-    collectionId: string,
-    clipId: string,
-    collectionClipId: string,
-    type: CollectionHookType
-  ) => {
-    const draftKey = buildHookDraftKey(collectionClipId, type);
+  const addHookToClipAction = async (clipId: string, type: CollectionHookType) => {
+    const draftKey = buildHookDraftKey(clipId, type);
     const text = hookDrafts[draftKey]?.trim() ?? "";
     if (!text) {
       setErrorMessage(`Escribe un texto para ${collectionHookLabel(type).toLowerCase()}.`);
@@ -1426,7 +1422,7 @@ export function ClipStudio(): JSX.Element {
 
     try {
       resetMessages();
-      const response = await fetch(withBasePath(`/api/collections/${collectionId}/clips/${clipId}/hooks`), {
+      const response = await fetch(withBasePath(`/api/clips/${clipId}/hooks`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type, text })
@@ -1440,6 +1436,7 @@ export function ClipStudio(): JSX.Element {
         ...current,
         [draftKey]: ""
       }));
+      await refreshLibrary(selectedSongId ?? undefined);
       await refreshCollections();
       setInfoMessage(`${collectionHookLabel(type)} añadidos al clip.`);
     } catch (error) {
@@ -1448,8 +1445,7 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
-  const updateCollectionHookAction = async (params: {
-    collectionId: string;
+  const updateClipHookAction = async (params: {
     clipId: string;
     hookId: string;
     text?: string;
@@ -1458,21 +1454,19 @@ export function ClipStudio(): JSX.Element {
   }) => {
     try {
       resetMessages();
-      const response = await fetch(
-        withBasePath(`/api/collections/${params.collectionId}/clips/${params.clipId}/hooks/${params.hookId}`),
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            text: params.text,
-            isDisabled: params.isDisabled
-          })
-        }
-      );
+      const response = await fetch(withBasePath(`/api/clips/${params.clipId}/hooks/${params.hookId}`), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: params.text,
+          isDisabled: params.isDisabled
+        })
+      });
       const data = (await response.json()) as { hook?: { id: string }; error?: string };
       if (!response.ok || !data.hook) {
         throw new Error(data.error || "No se pudo actualizar el hook");
       }
+      await refreshLibrary(selectedSongId ?? undefined);
       await refreshCollections();
       setInfoMessage(params.successMessage);
     } catch (error) {
@@ -1481,14 +1475,13 @@ export function ClipStudio(): JSX.Element {
     }
   };
 
-  const editCollectionHookAction = async (collectionId: string, clipId: string, hook: CollectionHook) => {
+  const editClipHookAction = async (clipId: string, hook: CollectionHook) => {
     const nextText = window.prompt("Editar hook:", hook.text)?.trim();
     if (!nextText || nextText === hook.text) {
       return;
     }
 
-    await updateCollectionHookAction({
-      collectionId,
+    await updateClipHookAction({
       clipId,
       hookId: hook.id,
       text: nextText,
@@ -1496,14 +1489,8 @@ export function ClipStudio(): JSX.Element {
     });
   };
 
-  const toggleCollectionHookDisabledAction = async (
-    collectionId: string,
-    clipId: string,
-    hook: CollectionHook,
-    isDisabled: boolean
-  ) => {
-    await updateCollectionHookAction({
-      collectionId,
+  const toggleClipHookDisabledAction = async (clipId: string, hook: CollectionHook, isDisabled: boolean) => {
+    await updateClipHookAction({
       clipId,
       hookId: hook.id,
       isDisabled,
@@ -1511,16 +1498,15 @@ export function ClipStudio(): JSX.Element {
     });
   };
 
-  const deleteCollectionHookAction = async (collectionId: string, clipId: string, hookId: string) => {
+  const deleteClipHookAction = async (clipId: string, hookId: string) => {
     try {
       resetMessages();
-      const response = await fetch(withBasePath(`/api/collections/${collectionId}/clips/${clipId}/hooks/${hookId}`), {
-        method: "DELETE"
-      });
+      const response = await fetch(withBasePath(`/api/clips/${clipId}/hooks/${hookId}`), { method: "DELETE" });
       const data = (await response.json()) as { ok?: boolean; error?: string };
       if (!response.ok || !data.ok) {
         throw new Error(data.error || "No se pudo eliminar el hook");
       }
+      await refreshLibrary(selectedSongId ?? undefined);
       await refreshCollections();
       setInfoMessage("Hook eliminado.");
     } catch (error) {
@@ -2168,7 +2154,7 @@ export function ClipStudio(): JSX.Element {
                         {playbackStatus && <span className="playback-pill inline">{playbackStatus}</span>}
                       </p>
 
-                      <div className="clip-actions">
+	                      <div className="clip-actions">
                         {isCurrent ? (
                           <button type="button" className="btn btn-warning" onClick={stopPlayback}>
                             Stop
@@ -2203,12 +2189,81 @@ export function ClipStudio(): JSX.Element {
                           disabled={!selectedCollectionIdForAdd}
                           onClick={() => void addClipToCollectionAction(selectedCollectionIdForAdd, clip.id)}
                         >
-                          Añadir a colección
-                        </button>
+	                          Añadir a colección
+	                        </button>
+	                      </div>
+
+                      <div className="clip-hooks">
+                        {(["spoken", "text"] as const).map((hookType) => {
+                          const hooks = clip.hooks.filter((hook) => hook.type === hookType);
+                          const draftKey = buildHookDraftKey(clip.id, hookType);
+
+                          return (
+                            <div key={hookType} className="collection-hook-group">
+                              <strong>{collectionHookLabel(hookType)}</strong>
+                              <div className="collection-hook-input">
+                                <input
+                                  type="text"
+                                  className="text-input"
+                                  placeholder={`Añadir ${hookType === "spoken" ? "hook hablado" : "hook de texto"}`}
+                                  value={hookDrafts[draftKey] ?? ""}
+                                  onChange={(event) =>
+                                    setHookDrafts((current) => ({
+                                      ...current,
+                                      [draftKey]: event.target.value
+                                    }))
+                                  }
+                                />
+                                <button
+                                  type="button"
+                                  className="btn btn-ghost"
+                                  onClick={() => void addHookToClipAction(clip.id, hookType)}
+                                >
+                                  Añadir
+                                </button>
+                              </div>
+
+                              {hooks.length === 0 ? (
+                                <p className="small-note">Sin hooks todavía.</p>
+                              ) : (
+                                <ul className="collection-hook-items">
+                                  {hooks.map((hook) => (
+                                    <li key={hook.id} className={`collection-hook-item ${hook.isDisabled ? "is-disabled" : ""}`}>
+                                      <span>{hook.text}</span>
+                                      <div className="collection-hook-actions">
+                                        <button
+                                          type="button"
+                                          className="btn btn-ghost"
+                                          onClick={() => void editClipHookAction(clip.id, hook)}
+                                        >
+                                          Editar
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-ghost"
+                                          onClick={() => void toggleClipHookDisabledAction(clip.id, hook, !hook.isDisabled)}
+                                        >
+                                          {hook.isDisabled ? "Activar" : "Desactivar"}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="btn btn-warning"
+                                          onClick={() => void deleteClipHookAction(clip.id, hook.id)}
+                                        >
+                                          Eliminar
+                                        </button>
+                                      </div>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
-                    </article>
-                  );
-                })}
+	                    </article>
+	                  );
+	                })}
               </div>
             )}
           </div>
@@ -2474,112 +2529,20 @@ export function ClipStudio(): JSX.Element {
 
                   {collection.clips.length > 0 && (
                     <ul className="collection-clip-items">
-                      {collection.clips.map((item) => {
-                        const spokenHooks = item.hooks.filter((hook) => hook.type === "spoken");
-                        const textHooks = item.hooks.filter((hook) => hook.type === "text");
-
-                        return (
-                          <li key={item.id} className="collection-clip-item">
-                            <div className="collection-clip-row">
-                              <span>{item.songName} · {item.clipName}</span>
-                              <button
-                                type="button"
-                                className="btn btn-ghost"
-                                onClick={() => void removeClipFromCollectionAction(collection.id, item.clipId)}
-                              >
-                                Quitar
-                              </button>
-                            </div>
-
-                            <p className="small-note">
-                              Hooks hablados: {spokenHooks.length} · Hooks de texto: {textHooks.length}
-                            </p>
-
-                            {(["spoken", "text"] as const).map((hookType) => {
-                              const hooks = hookType === "spoken" ? spokenHooks : textHooks;
-                              const draftKey = buildHookDraftKey(item.id, hookType);
-
-                              return (
-                                <div key={hookType} className="collection-hook-group">
-                                  <strong>{collectionHookLabel(hookType)}</strong>
-                                  <div className="collection-hook-input">
-                                    <input
-                                      type="text"
-                                      className="text-input"
-                                      placeholder={`Añadir ${hookType === "spoken" ? "hook hablado" : "hook de texto"}`}
-                                      value={hookDrafts[draftKey] ?? ""}
-                                      onChange={(event) =>
-                                        setHookDrafts((current) => ({
-                                          ...current,
-                                          [draftKey]: event.target.value
-                                        }))
-                                      }
-                                    />
-                                    <button
-                                      type="button"
-                                      className="btn btn-ghost"
-                                      onClick={() =>
-                                        void addHookToCollectionClipAction(collection.id, item.clipId, item.id, hookType)
-                                      }
-                                    >
-                                      Añadir
-                                    </button>
-                                  </div>
-
-                                  {hooks.length === 0 ? (
-                                    <p className="small-note">Sin hooks todavía.</p>
-                                  ) : (
-                                    <ul className="collection-hook-items">
-                                      {hooks.map((hook) => (
-                                        <li
-                                          key={hook.id}
-                                          className={`collection-hook-item ${hook.isDisabled ? "is-disabled" : ""}`}
-                                        >
-                                          <span>{hook.text}</span>
-                                          <div className="collection-hook-actions">
-                                            <button
-                                              type="button"
-                                              className="btn btn-ghost"
-                                              onClick={() =>
-                                                void editCollectionHookAction(collection.id, item.clipId, hook)
-                                              }
-                                            >
-                                              Editar
-                                            </button>
-                                            <button
-                                              type="button"
-                                              className="btn btn-ghost"
-                                              onClick={() =>
-                                                void toggleCollectionHookDisabledAction(
-                                                  collection.id,
-                                                  item.clipId,
-                                                  hook,
-                                                  !hook.isDisabled
-                                                )
-                                              }
-                                            >
-                                              {hook.isDisabled ? "Activar" : "Desactivar"}
-                                            </button>
-                                            <button
-                                              type="button"
-                                              className="btn btn-warning"
-                                              onClick={() =>
-                                                void deleteCollectionHookAction(collection.id, item.clipId, hook.id)
-                                              }
-                                            >
-                                              Eliminar
-                                            </button>
-                                          </div>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </li>
-                        );
-                      })}
+                      {collection.clips.map((item) => (
+                        <li key={item.id} className="collection-clip-item">
+                          <div className="collection-clip-row">
+                            <span>{item.songName} · {item.clipName}</span>
+                            <button
+                              type="button"
+                              className="btn btn-ghost"
+                              onClick={() => void removeClipFromCollectionAction(collection.id, item.clipId)}
+                            >
+                              Quitar
+                            </button>
+                          </div>
+                        </li>
+                      ))}
                     </ul>
                   )}
 
